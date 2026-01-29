@@ -1,4 +1,4 @@
-package com.example.eob_rfid
+package ui
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
@@ -11,11 +11,11 @@ import androidx.compose.ui.text.font.FontWeight
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MoreIssuesScreen(onBack: () -> Boolean) {
+fun MoreTransferScreen(onBack: () -> Boolean) {
     Scaffold(
         topBar = {
             CenterAlignedTopAppBar(
-                title = { Text("รายการปัญหา", fontWeight = FontWeight.Bold) },
+                title = { Text("โอนสินค้า", fontWeight = FontWeight.Bold) },
                 navigationIcon = {
                     IconButton(onClick = { onBack() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
@@ -25,7 +25,7 @@ fun MoreIssuesScreen(onBack: () -> Boolean) {
         }
     ) { pad ->
         Box(Modifier.fillMaxSize().padding(pad), contentAlignment = Alignment.Center) {
-            Text("หน้ารายการปัญหา (ทำต่อได้เลย)")
+            Text("หน้าโอนสินค้า (ทำต่อได้เลยหกดหกดหกด)")
         }
     }
 }

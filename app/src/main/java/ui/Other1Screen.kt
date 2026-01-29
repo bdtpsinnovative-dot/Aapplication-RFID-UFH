@@ -1,4 +1,4 @@
-package com.example.eob_rfid
+package ui
 
 import android.Manifest
 import android.annotation.SuppressLint
@@ -35,6 +35,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -53,11 +54,14 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import coil.compose.AsyncImage
 import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
+import data.SessionManager
+import data.SupabaseConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -498,7 +502,7 @@ private fun ScannerOverlay(boxSize: Dp) {
         val rectPath = Path().apply { addRect(Rect(0f, 0f, canvasW, canvasH)) }
         val holePath = Path().apply {
             addRoundRect(
-                androidx.compose.ui.geometry.RoundRect(
+                RoundRect(
                     rect = Rect(left, top, right, bottom),
                     cornerRadius = CornerRadius(cornerRad, cornerRad)
                 )
@@ -564,7 +568,7 @@ private fun CameraBarcodePreview(
     onResult: (String) -> Unit
 ) {
     val context = LocalContext.current
-    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    val lifecycleOwner = LocalLifecycleOwner.current
 
     val previewView = remember { PreviewView(context) }
     val analyzeExecutor = remember { Executors.newSingleThreadExecutor() }

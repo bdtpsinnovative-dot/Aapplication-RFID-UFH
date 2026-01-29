@@ -1,15 +1,12 @@
-package com.example.eob_rfid
+package ui
 
 import android.view.KeyEvent as AndroidKeyEvent
-import androidx.activity.compose.BackHandler
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -21,7 +18,6 @@ import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.outlined.*
-import androidx.compose.material.ripple.rememberRipple
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -32,21 +28,23 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.key.*
-import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+// ✅ ตัด AuthManager ออก
+import data.SessionStore
+import data.StockReceivingBrowseApi
+import data.StockReceivingItem
+import data.SupabaseConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -59,6 +57,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.text.DecimalFormat
+import kotlin.collections.iterator
 import kotlin.math.floor
 
 // --- Constants & Config ---
@@ -107,7 +106,11 @@ fun CheckRfidScreen(onBack: () -> Unit) {
             loading = true
             msg = null
             try {
-                items = StockReceivingBrowseApi.fetchAll(SessionStore.getAccessToken(ctx))
+                // ✅ กลับมาใช้แบบเดิม: ดึง Token จาก SessionStore ตรงๆ (เหมือน ReceiveScreen)
+                val token = SessionStore.getAccessToken(ctx) ?: ""
+                if (token.isBlank()) throw Exception("ไม่พบ Session กรุณาล็อกอินใหม่")
+
+                items = StockReceivingBrowseApi.fetchAll(token)
             } catch (e: Exception) {
                 msg = e.message ?: "โหลดข้อมูลไม่สำเร็จ"
             } finally {
@@ -155,8 +158,11 @@ fun CheckRfidScreen(onBack: () -> Unit) {
                         msg = null
                         scope.launch {
                             try {
+                                // ✅ กลับมาใช้แบบเดิม: ดึง Token จาก SessionStore ตรงๆ
+                                val token = SessionStore.getAccessToken(ctx) ?: ""
+                                if (token.isBlank()) throw Exception("ไม่พบ Session กรุณาล็อกอินใหม่")
+
                                 val payload = needList.associate { it.productId to (draftTags[it.productId] ?: emptyList()) }
-                                val token = SessionStore.getAccessToken(ctx)
 
                                 SupabaseBatchCommit.commitAll(
                                     data = payload,
@@ -312,7 +318,7 @@ fun ModernSummaryCard(totalHave: Int, totalNeed: Int, hasDuplicate: Boolean) {
         Row(Modifier.padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(contentAlignment = Alignment.Center, modifier = Modifier.size(64.dp)) {
                 CircularProgressIndicator(progress = { 1f }, modifier = Modifier.fillMaxSize(), color = ColorBg, strokeWidth = 6.dp, trackColor = ColorBg)
-                CircularProgressIndicator(progress = { animatedProgress }, modifier = Modifier.fillMaxSize(), color = if (hasDuplicate) Color.Red else ColorPrimary, strokeWidth = 6.dp, trackColor = ColorPrimarySoft, strokeCap = androidx.compose.ui.graphics.StrokeCap.Round)
+                CircularProgressIndicator(progress = { animatedProgress }, modifier = Modifier.fillMaxSize(), color = if (hasDuplicate) Color.Red else ColorPrimary, strokeWidth = 6.dp, trackColor = ColorPrimarySoft, strokeCap = StrokeCap.Round)
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text("${(progress * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = ColorTextMain)
                 }
@@ -349,7 +355,7 @@ fun ModernItemCard(item: StockReceivingItem, code: String?, qtyText: String, hav
             Spacer(Modifier.width(16.dp))
             Column(Modifier.weight(1f)) {
                 Text(item.name ?: "Unknown Product", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = ColorTextMain, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(code ?: "-", style = MaterialTheme.typography.bodySmall, color = ColorTextSec, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                Text(code ?: "-", style = MaterialTheme.typography.bodySmall, color = ColorTextSec, fontFamily = FontFamily.Monospace)
             }
             Spacer(Modifier.width(8.dp))
             Column(horizontalAlignment = Alignment.End) {
@@ -517,7 +523,7 @@ fun ScannerPulseAnimation(isScanning: Boolean) {
 fun ScannedItemRow(index: Int, code: String, onDelete: () -> Unit) {
     Row(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(ColorBg).padding(horizontal = 12.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
         Text("$index.", style = MaterialTheme.typography.bodySmall, color = ColorTextSec, modifier = Modifier.width(24.dp))
-        Text(code, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, color = ColorTextMain, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, modifier = Modifier.weight(1f))
+        Text(code, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, color = ColorTextMain, fontFamily = FontFamily.Monospace, modifier = Modifier.weight(1f))
         IconButton(onClick = onDelete, modifier = Modifier.size(24.dp)) { Icon(Icons.Default.Delete, null, tint = ColorTextSec, modifier = Modifier.size(18.dp)) }
     }
 }

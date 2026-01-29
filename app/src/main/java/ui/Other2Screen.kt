@@ -1,4 +1,4 @@
-package com.example.eob_rfid
+package ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -15,15 +15,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import navigation.Routes
 
 private data class MoreMenuItem(
     val title: String,
     val subtitle: String,
     val route: String,
-    val icon: androidx.compose.ui.graphics.vector.ImageVector
+    val icon: ImageVector
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -157,7 +159,7 @@ fun Other2Screen(
 private fun AdminMenuCard(
     title: String,
     subtitle: String,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    icon: ImageVector,
     onClick: () -> Unit
 ) {
     Card(

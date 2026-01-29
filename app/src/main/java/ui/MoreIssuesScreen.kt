@@ -1,4 +1,4 @@
-package com.example.eob_rfid
+package ui
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
@@ -11,11 +11,11 @@ import androidx.compose.ui.text.font.FontWeight
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MoreInitialCountScreen(onBack: () -> Boolean) {
+fun MoreIssuesScreen(onBack: () -> Boolean) {
     Scaffold(
         topBar = {
             CenterAlignedTopAppBar(
-                title = { Text("นับสินค้าตั้งต้น", fontWeight = FontWeight.Bold) },
+                title = { Text("รายการปัญหา", fontWeight = FontWeight.Bold) },
                 navigationIcon = {
                     IconButton(onClick = { onBack() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
@@ -25,7 +25,7 @@ fun MoreInitialCountScreen(onBack: () -> Boolean) {
         }
     ) { pad ->
         Box(Modifier.fillMaxSize().padding(pad), contentAlignment = Alignment.Center) {
-            Text("หน้านับสินค้าตั้งต้น (ทำต่อได้เลย)")
+            Text("หน้ารายการปัญหา (ทำต่อได้เลย)")
         }
     }
 }

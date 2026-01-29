@@ -1,4 +1,4 @@
-package com.example.eob_rfid
+package data
 
 import io.github.jan.supabase.createSupabaseClient
 import io.github.jan.supabase.postgrest.Postgrest
@@ -8,6 +8,6 @@ object SupabaseProvider {
         supabaseUrl = SupabaseConfig.URL,
         supabaseKey = SupabaseConfig.ANON_KEY
     ) {
-        install(Postgrest)
+        install(Postgrest.Companion)
     }
 }

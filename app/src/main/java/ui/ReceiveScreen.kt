@@ -1,6 +1,6 @@
 // ไฟล์: com/example/eob_rfid/ReceiveScreen.kt
 
-package com.example.eob_rfid
+package ui
 
 import android.Manifest
 import android.annotation.SuppressLint
@@ -20,13 +20,11 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.Inventory2
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
@@ -36,10 +34,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.rememberVectorPainter // ✅ เพิ่ม Import นี้
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -57,6 +54,11 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
+import data.ProductLite
+import data.SessionStore
+import data.StockReceivingApi
+import data.StockUpdateDto
+import data.SupabaseProductsApi
 import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
@@ -171,7 +173,13 @@ fun ReceiveScreen(onBack: () -> Unit) {
             try {
                 val ids = pending.map { it.productId }.distinct()
                 val currentMap = StockReceivingApi.fetchQtyMap(ids, branchId, token)
-                val updates = pending.map { StockUpdateDto(branchId, it.productId, (currentMap[it.productId] ?: 0.0) + it.qty) }
+                val updates = pending.map {
+                    StockUpdateDto(
+                        branchId,
+                        it.productId,
+                        (currentMap[it.productId] ?: 0.0) + it.qty
+                    )
+                }
                 StockReceivingApi.upsertStockList(updates, token)
                 for (i in rows.indices) {
                     val r = rows[i]
@@ -532,7 +540,7 @@ private fun ReceiveScannerOverlay(modifier: Modifier, onClose: () -> Unit) {
             val top = (size.height - boxSize) / 2
             val left = (size.width - boxSize) / 2
             drawRect(Color(0x99000000))
-            drawRect(Color.Transparent, topLeft = Offset(left, top), size = Size(boxSize, boxSize), blendMode = androidx.compose.ui.graphics.BlendMode.Clear)
+            drawRect(Color.Transparent, topLeft = Offset(left, top), size = Size(boxSize, boxSize), blendMode = BlendMode.Clear)
             drawRect(Color.White, topLeft = Offset(left, top), size = Size(boxSize, boxSize), style = Stroke(4.dp.toPx()))
             drawLine(Color.Red, start = Offset(left, top + (boxSize * anim)), end = Offset(left + boxSize, top + (boxSize * anim)), strokeWidth = 4.dp.toPx())
         }

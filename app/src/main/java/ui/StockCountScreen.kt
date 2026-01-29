@@ -1,4 +1,4 @@
-package com.example.eob_rfid
+package ui
 
 import android.Manifest
 import android.util.Log
@@ -11,7 +11,6 @@ import androidx.compose.animation.core.*
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -39,17 +38,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
+import data.SessionManager
 
 // --- ✅ Import ให้ตรงกับ Demo จีน ---
 import com.xlzn.hcpda.uhf.UHFReader
-import com.xlzn.hcpda.uhf.entity.UHFTagEntity
-import com.xlzn.hcpda.uhf.interfaces.OnInventoryDataListener
+import data.SupabaseConfig
 // ---------------------------------
 
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch

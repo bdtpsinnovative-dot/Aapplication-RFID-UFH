@@ -1,4 +1,4 @@
-package com.example.eob_rfid
+package data
 
 import com.example.eob_rfid.BuildConfig
 import kotlinx.coroutines.Dispatchers

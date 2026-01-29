@@ -1,6 +1,6 @@
 // ไฟล์: com/example/eob_rfid/SupabaseProductsApi.kt
 
-package com.example.eob_rfid
+package data
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext

@@ -1,4 +1,4 @@
-package com.example.eob_rfid
+package data
 
 import android.content.Context
 

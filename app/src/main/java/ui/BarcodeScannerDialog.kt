@@ -1,4 +1,4 @@
-package com.example.eob_rfid
+package ui
 
 import androidx.compose.ui.viewinterop.AndroidView
 import android.annotation.SuppressLint

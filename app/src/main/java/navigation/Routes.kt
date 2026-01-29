@@ -1,4 +1,4 @@
-package com.example.eob_rfid
+package navigation
 
 object Routes {
     const val LOGIN = "login"

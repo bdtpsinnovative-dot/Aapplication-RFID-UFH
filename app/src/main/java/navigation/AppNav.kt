@@ -1,4 +1,4 @@
-package com.example.eob_rfid
+package navigation
 import androidx.compose.material.icons.filled.Logout
 import android.app.Activity
 import android.widget.Toast
@@ -35,7 +35,21 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import ui.Other1Screen
+import ui.Other2Screen
+import data.SessionStore
+import data.SupabaseAuthApi
 import kotlinx.coroutines.launch
+import ui.CheckRfidScreen
+import ui.CompareStockScreenV2
+import ui.MoreArrangeScreen
+import ui.MoreDamageScreen
+import ui.MoreInitialCountScreen
+import ui.MoreIssuesScreen
+import ui.MoreTransferScreen
+import ui.MoreUpdateSystemScreen
+import ui.ReceiveScreen
+import ui.StockCountScreen
 
 // --- Data Class สำหรับเมนู ---
 data class MenuData(

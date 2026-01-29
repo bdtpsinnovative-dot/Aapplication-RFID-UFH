@@ -1,4 +1,4 @@
-package com.example.eob_rfid
+package ui
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
