@@ -38,9 +38,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+// ✅ Import AuthManager เพิ่มเข้ามา (เพื่อความถาวร)
+import data.AuthManager
 import data.SessionManager
 
-// --- ✅ Import ให้ตรงกับ Demo จีน ---
+// --- ✅ Import ให้ตรงกับ Demo จีน (คงเดิมทุกประการ) ---
 import com.xlzn.hcpda.uhf.UHFReader
 import data.SupabaseConfig
 // ---------------------------------
@@ -59,7 +61,7 @@ import org.json.JSONObject
 import java.net.URLEncoder
 import java.time.Instant
 
-// --- THEME & COLORS ---
+// --- THEME & COLORS (คงเดิม) ---
 private val ColorPrimary = Color(0xFF4F46E5)
 private val ColorBg = Color(0xFFF1F5F9)
 private val ColorSurface = Color(0xFFFFFFFF)
@@ -88,7 +90,7 @@ fun StockCountScreen(onBack: () -> Unit) {
     val lifecycleOwner = LocalLifecycleOwner.current
     val context = LocalContext.current
 
-    // --- SDK STATE ---
+    // --- SDK STATE (คงเดิม 100% ห้ามแตะ) ---
     var isReaderConnected by remember { mutableStateOf(false) }
     var uhfReader by remember { mutableStateOf<UHFReader?>(null) }
     var permissionGranted by remember { mutableStateOf(false) }
@@ -102,7 +104,7 @@ fun StockCountScreen(onBack: () -> Unit) {
     var confirming by remember { mutableStateOf(false) }
     var showCheckDialog by remember { mutableStateOf(false) }
 
-    // --- DATA STATE ---
+    // --- DATA STATE (คงเดิม) ---
     val scannedList = rememberSaveable(
         saver = listSaver(save = { it.toList() }, restore = { it.toMutableStateList() })
     ) { mutableStateListOf<String>() }
@@ -129,7 +131,7 @@ fun StockCountScreen(onBack: () -> Unit) {
     }
 
     // -------------------------------------------------------------------------
-    // 1. Permission Request (จำเป็นสำหรับเครื่องจริง)
+    // 1. Permission Request (คงเดิม)
     // -------------------------------------------------------------------------
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -155,19 +157,18 @@ fun StockCountScreen(onBack: () -> Unit) {
     }
 
     // -------------------------------------------------------------------------
-    // 2. SDK INIT
+    // 2. SDK INIT (คงเดิม 100% ห้ามแตะ)
     // -------------------------------------------------------------------------
     LaunchedEffect(permissionGranted) {
         if (!permissionGranted) return@LaunchedEffect
 
         withContext(Dispatchers.IO) {
             var retryCount = 0
-            val maxRetries = 3 // ลดจำนวน Retry ลงหน่อยสำหรับ Emulator จะได้ไม่รอนาน
+            val maxRetries = 3
             var connected = false
 
             while (retryCount < maxRetries && !connected) {
                 try {
-                    // ⚠️ ใน Emulator บรรทัดนี้อาจจะ return null หรือ throw error เพราะไม่มีไฟล์ .so
                     val reader = UHFReader.getInstance()
 
                     if (reader == null) {
@@ -184,18 +185,14 @@ fun StockCountScreen(onBack: () -> Unit) {
                     val result = reader.connect(context)
 
                     if (result?.data == true) {
-                        // ✅ Connect สำเร็จ (เฉพาะเครื่องจริง)
                         withContext(Dispatchers.Main) {
                             delay(500)
                             reader.setPower(30)
 
-                            // 👇 [จุดที่แก้ไข Final] ใช้ ecpHex ตามรูปที่แคปมา
                             reader.setOnInventoryDataListener { tagsList ->
                                 if (!tagsList.isNullOrEmpty()) {
                                     for (tag in tagsList) {
-                                        // ✅ ใช้ ecpHex ตรงๆ (ชัวร์ที่สุดจากรูป Autocomplete)
                                         val rfid = tag.ecpHex
-
                                         if (!rfid.isNullOrEmpty()) {
                                             scanCh.trySend(normalizeToken(rfid))
                                         }
@@ -216,12 +213,10 @@ fun StockCountScreen(onBack: () -> Unit) {
                         delay(1500)
                     }
                 } catch (t: Throwable) {
-                    // ⚠️ Emulator มักจะตกมาที่ catch นี้ เพราะสถาปัตยกรรม CPU ไม่ตรง (x86 vs arm)
                     Log.e("UHF_INIT", "Error: ${t.message}", t)
                     retryCount++
                     withContext(Dispatchers.Main) {
                         bannerStatus = BannerStatus.ERROR
-                        // แสดงข้อความให้รู้ว่า Code ทำงานแล้ว แต่ Hardware ไม่มี
                         bannerText = "Emulator/Error: ${t.localizedMessage}"
                     }
                     delay(2000)
@@ -230,7 +225,7 @@ fun StockCountScreen(onBack: () -> Unit) {
         }
     }
 
-    // --- LIFECYCLE CLEANUP ---
+    // --- LIFECYCLE CLEANUP (คงเดิม) ---
     DisposableEffect(lifecycleOwner) {
         onDispose {
             try {
@@ -241,7 +236,7 @@ fun StockCountScreen(onBack: () -> Unit) {
         }
     }
 
-    // --- SCAN CONTROL ---
+    // --- SCAN CONTROL (คงเดิม) ---
     LaunchedEffect(scanningOn) {
         if (!isReaderConnected) return@LaunchedEffect
 
@@ -263,7 +258,7 @@ fun StockCountScreen(onBack: () -> Unit) {
         }
     }
 
-    // --- DATA PROCESSOR ---
+    // --- DATA PROCESSOR (คงเดิม) ---
     LaunchedEffect(Unit) {
         for (tag in scanCh) {
             scanningBusy = true
@@ -288,20 +283,24 @@ fun StockCountScreen(onBack: () -> Unit) {
         resultTab = "GROUP"; bannerStatus = BannerStatus.NONE; bannerText = null
     }
 
-    // ... (ส่วน UI และ Logic Supabase ด้านล่างเหมือนเดิม) ...
-
     fun groupedFound(): List<GroupRow> {
         return found.groupBy { it.productId }.map { (pid, list) ->
             GroupRow(pid, list.first().productName ?: "สินค้า #$pid", list.size.toLong())
         }.sortedWith(compareByDescending<GroupRow> { it.qty }.thenBy { it.productId })
     }
 
+    // -------------------------------------------------------------------------
+    // ✅ จุดแก้ไขที่ 1: ใช้ AuthManager ในฟังก์ชันตรวจสอบ
+    // -------------------------------------------------------------------------
     suspend fun doCheck() {
         if (checking || confirming) return
         if (scannedList.isEmpty()) { bannerStatus = BannerStatus.WARN; bannerText = "ยังไม่มีข้อมูล"; return }
         checking = true; bannerStatus = BannerStatus.NONE; bannerText = null
         try {
-            val results = SupabaseBatchCheckApi.lookupMany(scannedList.toList(), SessionManager.accessToken)
+            // 👇 แก้บรรทัดนี้: เรียก AuthManager.getValidAccessToken(context)
+            val validToken = AuthManager.getValidAccessToken(context)
+
+            val results = SupabaseBatchCheckApi.lookupMany(scannedList.toList(), validToken)
             found = results; missing = scannedList.filter { tag -> results.none { it.rfid == tag } }
             checked = true; resultTab = "GROUP"
             bannerStatus = BannerStatus.OK; bannerText = "ตรวจสอบสำเร็จ: ครบ ${found.size} / ขาด ${missing.size}"
@@ -310,12 +309,19 @@ fun StockCountScreen(onBack: () -> Unit) {
         } finally { checking = false }
     }
 
+    // -------------------------------------------------------------------------
+    // ✅ จุดแก้ไขที่ 2: ใช้ AuthManager ในฟังก์ชันบันทึก
+    // -------------------------------------------------------------------------
     suspend fun confirmToReaderStock() {
         if (confirming || checking || !checked || found.isEmpty()) return
         confirming = true; bannerStatus = BannerStatus.NONE; bannerText = null
         try {
             val groups = groupedFound()
-            SupabaseReaderStockApi.upsertFromCounts(groups, SessionManager.accessToken)
+
+            // 👇 แก้บรรทัดนี้: เรียก AuthManager.getValidAccessToken(context)
+            val validToken = AuthManager.getValidAccessToken(context)
+
+            SupabaseReaderStockApi.upsertFromCounts(groups, validToken)
             bannerStatus = BannerStatus.OK; bannerText = "บันทึกสต๊อกเรียบร้อย (${groups.size} รายการ)"
             clearAll()
         } catch (e: Exception) {
@@ -323,7 +329,7 @@ fun StockCountScreen(onBack: () -> Unit) {
         } finally { confirming = false }
     }
 
-    // --- UI CODE ---
+    // --- UI CODE (คงเดิม) ---
     Scaffold(
         containerColor = ColorBg,
         topBar = {
@@ -382,7 +388,6 @@ fun StockCountScreen(onBack: () -> Unit) {
                         Button(
                             onClick = {
                                 if (!isReaderConnected) {
-                                    // ⚠️ ใน Emulator จะเข้าเคสนี้เสมอ เพราะ isReaderConnected = false
                                     Toast.makeText(context, "ไม่พบเครื่องสแกน (Emulator Mode)", Toast.LENGTH_SHORT).show()
                                 } else {
                                     scanningOn = !scanningOn
@@ -432,7 +437,7 @@ fun StockCountScreen(onBack: () -> Unit) {
         }
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
-            // Dashboard
+            // Dashboard (คงเดิม)
             Box(
                 Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)
                     .shadow(12.dp, RoundedCornerShape(24.dp), spotColor = ColorPrimary.copy(0.4f))
@@ -476,7 +481,7 @@ fun StockCountScreen(onBack: () -> Unit) {
                 }
             }
 
-            // List Content
+            // List Content (คงเดิม)
             LazyColumn(
                 contentPadding = PaddingValues(bottom = 20.dp, start = 10.dp, end = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -578,6 +583,8 @@ fun ResultRow(title: String, subtitle: String, isSuccess: Boolean) {
 }
 
 // ... (API Objects: SupabaseBatchCheckApi, SupabaseReaderStockApi ใช้ของเดิมได้เลยครับ ไม่ต้องแก้) ...
+// (เพื่อความชัวร์ ผมขอแปะให้ครบเพื่อให้ก๊อปทีเดียวจบครับ)
+
 private object SupabaseBatchCheckApi {
     private val client = OkHttpClient()
     private fun bearer(t: String?): String = t?.takeIf { it.isNotBlank() } ?: SupabaseConfig.ANON_KEY

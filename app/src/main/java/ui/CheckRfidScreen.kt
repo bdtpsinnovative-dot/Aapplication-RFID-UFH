@@ -11,13 +11,16 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.outlined.*
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -40,7 +43,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-// ✅ ตัด AuthManager ออก
+import data.AuthManager
+import data.ProductDatabase
+import data.ProductSyncManager
+import data.SessionManager
 import data.SessionStore
 import data.StockReceivingBrowseApi
 import data.StockReceivingItem
@@ -86,13 +92,40 @@ fun CheckRfidScreen(onBack: () -> Unit) {
 
     val currentBranchId = remember { SessionStore.getBranchId(ctx) }
     val currentBranchName = remember { SessionStore.getBranchName(ctx) }
-    val currentUserId = remember { SessionStore.getUserId(ctx) }
+    // ✅ User ID ดึงจาก SessionManager หรือ Store ก็ได้
+    val currentUserId = remember { SessionManager.userId ?: SessionStore.getUserId(ctx) }
     val currentUserName = remember { SessionStore.getDisplayName(ctx) }
 
     var loading by remember { mutableStateOf(false) }
     var savingAll by remember { mutableStateOf(false) }
     var msg by remember { mutableStateOf<String?>(null) }
     var items by remember { mutableStateOf<List<StockReceivingItem>>(emptyList()) }
+
+    var syncing by remember { mutableStateOf(false) }
+    var syncMsg by remember { mutableStateOf<String?>(null) }
+    var syncProgress by remember { mutableStateOf(0 to 0) }
+
+    fun syncProducts() {
+        scope.launch {
+            syncing = true
+            syncMsg = null
+            try {
+                val token = AuthManager.getValidAccessToken(ctx)
+                ProductSyncManager.syncAll(ctx, token) { done, total ->
+                    syncProgress = done to total
+                }
+                val cnt = ProductDatabase(ctx).count()
+                syncMsg = "✓ ซิงก์สินค้าสำเร็จ $cnt รายการ"
+            } catch (e: Exception) {
+                syncMsg = "ซิงก์ไม่สำเร็จ: ${e.message}"
+            } finally {
+                syncing = false
+                // ล้าง message หลัง 5 วินาที
+                kotlinx.coroutines.delay(5_000)
+                syncMsg = null
+            }
+        }
+    }
 
     val draftTags = remember { mutableStateMapOf<Long, List<String>>() }
     var picked by remember { mutableStateOf<StockReceivingItem?>(null) }
@@ -106,9 +139,11 @@ fun CheckRfidScreen(onBack: () -> Unit) {
             loading = true
             msg = null
             try {
-                // ✅ กลับมาใช้แบบเดิม: ดึง Token จาก SessionStore ตรงๆ (เหมือน ReceiveScreen)
-                val token = SessionStore.getAccessToken(ctx) ?: ""
-                if (token.isBlank()) throw Exception("ไม่พบ Session กรุณาล็อกอินใหม่")
+                // ✅ เปลี่ยนมาใช้ AuthManager เพื่อความถาวร!
+                // มันจะเช็คให้เองว่าหมดอายุรึยัง ถ้าหมดก็ต่อให้ ถ้าไม่หมดก็ส่งมาเลย
+                val token = AuthManager.getValidAccessToken(ctx)
+
+                if (token.isNullOrBlank()) throw Exception("กรุณาล็อกอินใหม่")
 
                 items = StockReceivingBrowseApi.fetchAll(token)
             } catch (e: Exception) {
@@ -119,7 +154,10 @@ fun CheckRfidScreen(onBack: () -> Unit) {
         }
     }
 
-    LaunchedEffect(Unit) { load() }
+    LaunchedEffect(Unit) {
+        load()
+        if (ProductSyncManager.needsSync(ctx)) syncProducts()
+    }
 
     val needList = remember(items) { items.filter { reqSlots(it.qty) > 0 } }
     val totalNeed = needList.sumOf { reqSlots(it.qty) }
@@ -141,7 +179,9 @@ fun CheckRfidScreen(onBack: () -> Unit) {
                 subtitle = "สาขา: $currentBranchName",
                 onBack = onBack,
                 onRefresh = { load() },
-                loading = loading || savingAll
+                onSyncProducts = { syncProducts() },
+                loading = loading || savingAll,
+                syncing = syncing
             )
         },
         bottomBar = {
@@ -158,9 +198,9 @@ fun CheckRfidScreen(onBack: () -> Unit) {
                         msg = null
                         scope.launch {
                             try {
-                                // ✅ กลับมาใช้แบบเดิม: ดึง Token จาก SessionStore ตรงๆ
-                                val token = SessionStore.getAccessToken(ctx) ?: ""
-                                if (token.isBlank()) throw Exception("ไม่พบ Session กรุณาล็อกอินใหม่")
+                                // ✅ ใช้ AuthManager ก่อนบันทึกด้วย เพื่อความชัวร์
+                                val token = AuthManager.getValidAccessToken(ctx)
+                                if (token.isNullOrBlank()) throw Exception("กรุณาล็อกอินใหม่")
 
                                 val payload = needList.associate { it.productId to (draftTags[it.productId] ?: emptyList()) }
 
@@ -201,6 +241,19 @@ fun CheckRfidScreen(onBack: () -> Unit) {
                     totalNeed = totalNeed,
                     hasDuplicate = hasDuplicateInDraft
                 )
+
+                // Sync status card
+                AnimatedVisibility(
+                    visible = syncing || !syncMsg.isNullOrBlank(),
+                    enter = expandVertically() + fadeIn(),
+                    exit = shrinkVertically() + fadeOut()
+                ) {
+                    SyncStatusCard(
+                        syncing = syncing,
+                        message = syncMsg,
+                        progress = syncProgress
+                    )
+                }
 
                 AnimatedVisibility(
                     visible = !msg.isNullOrBlank(),
@@ -273,12 +326,19 @@ fun CheckRfidScreen(onBack: () -> Unit) {
         )
     }
 }
-
-// ---------------- UI Components (Same as before) ----------------
+// ... (UI Components อื่นๆ คงเดิม) ...
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ModernTopBar(title: String, subtitle: String, onBack: () -> Unit, onRefresh: () -> Unit, loading: Boolean) {
+fun ModernTopBar(
+    title: String,
+    subtitle: String,
+    onBack: () -> Unit,
+    onRefresh: () -> Unit,
+    onSyncProducts: () -> Unit = {},
+    loading: Boolean,
+    syncing: Boolean = false
+) {
     CenterAlignedTopAppBar(
         title = {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -292,11 +352,16 @@ fun ModernTopBar(title: String, subtitle: String, onBack: () -> Unit, onRefresh:
             }
         },
         actions = {
-            if (loading) {
-                CircularProgressIndicator(modifier = Modifier.size(18.dp).padding(2.dp), strokeWidth = 2.dp, color = ColorPrimary)
-            } else {
-                IconButton(onClick = onRefresh) {
-                    Icon(Icons.Default.Refresh, contentDescription = "Refresh", tint = ColorTextMain)
+            when {
+                loading -> CircularProgressIndicator(modifier = Modifier.size(18.dp).padding(2.dp), strokeWidth = 2.dp, color = ColorPrimary)
+                syncing -> CircularProgressIndicator(modifier = Modifier.size(18.dp).padding(2.dp), strokeWidth = 2.dp, color = ColorSuccess)
+                else -> {
+                    IconButton(onClick = onSyncProducts) {
+                        Icon(Icons.Outlined.Sync, contentDescription = "Sync Products", tint = ColorTextSec, modifier = Modifier.size(20.dp))
+                    }
+                    IconButton(onClick = onRefresh) {
+                        Icon(Icons.Default.Refresh, contentDescription = "Refresh", tint = ColorTextMain)
+                    }
                 }
             }
         },
@@ -402,6 +467,46 @@ fun ModernAlertCard(text: String, isError: Boolean) {
 }
 
 @Composable
+fun SyncStatusCard(syncing: Boolean, message: String?, progress: Pair<Int, Int>) {
+    val (done, total) = progress
+    val bg = if (syncing) ColorPrimarySoft else if (message?.startsWith("✓") == true) ColorSuccessSoft else Color(0xFFFEF2F2)
+    val tint = if (syncing) ColorPrimary else if (message?.startsWith("✓") == true) ColorSuccess else Color(0xFFEF4444)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(bg)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        if (syncing) {
+            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = tint)
+        } else {
+            Icon(
+                if (message?.startsWith("✓") == true) Icons.Default.CheckCircle else Icons.Default.Warning,
+                null, tint = tint, modifier = Modifier.size(16.dp)
+            )
+        }
+        Column(Modifier.weight(1f)) {
+            Text(
+                if (syncing) "กำลังซิงก์ข้อมูลสินค้า..." else message.orEmpty(),
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.Medium,
+                color = tint
+            )
+            if (syncing && total > 0) {
+                Text(
+                    "$done / $total รายการ",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = tint.copy(alpha = 0.8f)
+                )
+            }
+        }
+    }
+}
+
+@Composable
 fun EmptyStateView(onRefresh: () -> Unit) {
     Column(modifier = Modifier.fillMaxWidth().padding(top = 40.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
         Box(modifier = Modifier.size(120.dp).clip(CircleShape).background(ColorPrimarySoft), contentAlignment = Alignment.Center) {
@@ -420,7 +525,8 @@ fun ModernRfidDialog(title: String, subtitle: String?, slots: Int, initial: List
     val list = remember { mutableStateListOf<String>().apply { addAll(initial) } }
     val localSet by remember { derivedStateOf { list.toSet() } }
     val usedOtherNorm = remember(usedOther) { usedOther.map { it.uppercase().trim() }.toSet() }
-    var scanning by rememberSaveable { mutableStateOf(true) }
+    var editableSlots by rememberSaveable { mutableStateOf(slots.coerceAtLeast(1)) }
+    var scanning by rememberSaveable { mutableStateOf(list.size < slots.coerceAtLeast(1)) }
     var scanBuffer by remember { mutableStateOf("") }
     var lastResult by remember { mutableStateOf<ScanResult?>(null) }
     val focusRequester = remember { FocusRequester() }
@@ -432,17 +538,28 @@ fun ModernRfidDialog(title: String, subtitle: String?, slots: Int, initial: List
 
     fun normalize(raw: String): String = raw.trim().replace(Regex("[^A-Za-z0-9]"), "").uppercase()
 
+    fun refocus() {
+        scope.launch {
+            delay(60)
+            try { focusRequester.requestFocus() } catch (_: Exception) {}
+            keyboardController?.hide()
+        }
+    }
+
     fun submitCode(raw: String) {
         val code = normalize(raw)
-        if (code.length < MIN_TOKEN_LEN) return
+        if (code.length < MIN_TOKEN_LEN) {
+            if (code.isNotBlank()) lastResult = ScanResult.Error("รหัสสั้นเกินไป", code)
+            return
+        }
         val now = System.currentTimeMillis()
         if (now - (lastSeenMs[code] ?: 0L) < BURST_GUARD_MS) return
         lastSeenMs[code] = now
         when {
-            list.size >= slots -> { lastResult = ScanResult.Error("ครบจำนวนแล้ว", code); haptic.performHapticFeedback(HapticFeedbackType.LongPress) }
+            list.size >= editableSlots -> { lastResult = ScanResult.Error("ครบจำนวนแล้ว", code); haptic.performHapticFeedback(HapticFeedbackType.LongPress) }
             localSet.contains(code) -> { lastResult = ScanResult.Error("สแกนซ้ำ (รายการนี้)", code); haptic.performHapticFeedback(HapticFeedbackType.LongPress) }
             usedOtherNorm.contains(code) -> { lastResult = ScanResult.Error("สแกนซ้ำ (สินค้าอื่น)", code); haptic.performHapticFeedback(HapticFeedbackType.LongPress) }
-            else -> { list.add(0, code); lastResult = ScanResult.Success("บันทึกสำเร็จ", code); if (list.size >= slots) { scanning = false; focusRequester.freeFocus() } }
+            else -> { list.add(0, code); lastResult = ScanResult.Success("บันทึกสำเร็จ", code); if (list.size >= editableSlots) { scanning = false; focusRequester.freeFocus() } }
         }
     }
 
@@ -469,6 +586,53 @@ fun ModernRfidDialog(title: String, subtitle: String?, slots: Int, initial: List
                         Column(Modifier.weight(1f)) { Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis); Text("SKU: ${subtitle ?: "-"}", style = MaterialTheme.typography.bodySmall, color = ColorTextSec) }
                         IconButton(onClick = onDismiss) { Icon(Icons.Default.Close, null, tint = ColorTextSec) }
                     }
+                    // Qty editor row
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 20.dp)
+                            .padding(bottom = 12.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(ColorBg)
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("จำนวนที่รับ:", style = MaterialTheme.typography.bodyMedium, color = ColorTextSec)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(
+                                onClick = {
+                                    if (editableSlots > list.size.coerceAtLeast(1)) editableSlots--
+                                    if (scanning) refocus()
+                                },
+                                modifier = Modifier.size(32.dp)
+                            ) { Icon(Icons.Default.Remove, null, tint = ColorPrimary, modifier = Modifier.size(18.dp)) }
+                            Text(
+                                "$editableSlots",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = ColorTextMain,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.widthIn(min = 36.dp)
+                            )
+                            IconButton(
+                                onClick = {
+                                    editableSlots++
+                                    if (list.size < editableSlots) scanning = true
+                                    refocus()
+                                },
+                                modifier = Modifier.size(32.dp)
+                            ) { Icon(Icons.Default.Add, null, tint = ColorPrimary, modifier = Modifier.size(18.dp)) }
+                            Spacer(Modifier.width(8.dp))
+                            TextButton(
+                                onClick = {
+                                    list.clear(); lastResult = null; scanning = true; scanBuffer = ""
+                                    refocus()
+                                },
+                                colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFFEF4444))
+                            ) { Text("ล้าง", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold) }
+                        }
+                    }
                     Divider(color = ColorBg)
                     Box(Modifier.fillMaxWidth().weight(0.4f).background(ColorBg), contentAlignment = Alignment.Center) {
                         ScannerPulseAnimation(isScanning = scanning)
@@ -489,21 +653,53 @@ fun ModernRfidDialog(title: String, subtitle: String?, slots: Int, initial: List
                     Column(Modifier.weight(0.6f).fillMaxWidth().background(Color.White)) {
                         Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                             Text("รายการที่ยิงแล้ว", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                            Surface(color = if (list.size == slots) ColorSuccess else ColorPrimarySoft, shape = RoundedCornerShape(12.dp)) { Text("${list.size} / $slots", modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = if (list.size == slots) Color.White else ColorPrimary) }
+                            Surface(color = if (list.size >= editableSlots) ColorSuccess else ColorPrimarySoft, shape = RoundedCornerShape(12.dp)) { Text("${list.size} / $editableSlots", modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = if (list.size >= editableSlots) Color.White else ColorPrimary) }
                         }
                         LazyColumn(contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             itemsIndexed(list) { index, code -> ScannedItemRow(index = list.size - index, code = code, onDelete = { list.removeAt(index) }) }
                         }
                     }
                     Row(Modifier.padding(20.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        OutlinedButton(onClick = { scanning = !scanning; if (scanning) { scope.launch { focusRequester.requestFocus(); keyboardController?.hide() } } }, modifier = Modifier.weight(1f).height(50.dp), shape = RoundedCornerShape(12.dp)) { Text(if (scanning) "หยุดยิง" else "เริ่มยิง") }
-                        Button(onClick = { onSaved(list.toList()) }, enabled = !scanning, modifier = Modifier.weight(1f).height(50.dp), shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.buttonColors(containerColor = ColorPrimary)) { Text("ยืนยัน") }
+                        OutlinedButton(
+                            onClick = {
+                                scanning = !scanning
+                                if (scanning) refocus()
+                            },
+                            modifier = Modifier.weight(1f).height(50.dp),
+                            shape = RoundedCornerShape(12.dp)
+                        ) { Text(if (scanning) "หยุดยิง" else "เริ่มยิง") }
+                        Button(
+                            onClick = { onSaved(list.toList()) },
+                            enabled = !scanning && list.isNotEmpty(),
+                            modifier = Modifier.weight(1f).height(50.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = ColorPrimary)
+                        ) {
+                            Text(if (list.size >= editableSlots) "ยืนยัน" else "ยืนยัน (${list.size})")
+                        }
                     }
                 }
             }
         }
     }
-    LaunchedEffect(Unit) { focusRequester.requestFocus(); keyboardController?.hide() }
+    // Re-focus card ทุกครั้งที่ scanning เปิด (รวมตอน dialog เปิดครั้งแรก)
+    LaunchedEffect(scanning) {
+        if (scanning) {
+            delay(80) // รอ recompose เสร็จ
+            try { focusRequester.requestFocus() } catch (_: Exception) {}
+            keyboardController?.hide()
+        }
+    }
+
+    // Auto-clear ผลสแกนหลัง 2.5 วินาที → พร้อมสแกนใหม่
+    LaunchedEffect(lastResult) {
+        if (lastResult != null) {
+            delay(2500)
+            lastResult = null
+            // คืน focus ให้ card หลัง clear เสมอ
+            if (scanning) try { focusRequester.requestFocus() } catch (_: Exception) {}
+        }
+    }
 }
 
 @Composable
@@ -593,19 +789,61 @@ private object SupabaseBatchCommit {
         return when (val v = o.opt("qty")) { is Number -> v.toDouble(); is String -> v.toDoubleOrNull(); else -> null }
     }
 
+    // ลอง atomic RPC ก่อน (ต้องมี function นี้ใน Supabase):
+    // CREATE OR REPLACE FUNCTION increment_stock(p_product_id bigint, p_branch_id bigint, p_delta numeric)
+    // RETURNS void LANGUAGE plpgsql AS $$
+    // BEGIN
+    //   INSERT INTO stock(product_id, branch_id, qty) VALUES (p_product_id, p_branch_id, p_delta)
+    //   ON CONFLICT (product_id, branch_id) DO UPDATE SET qty = stock.qty + EXCLUDED.qty;
+    // END; $$;
     private suspend fun addStock(productId: Long, inc: Double, accessToken: String?, branchId: Long) {
-        val old = getStockQty(productId, accessToken, branchId)
-        val newQty = (old ?: 0.0) + inc
-        val body = JSONObject().put("qty", newQty)
-        val builder = if (old == null) {
-            body.put("product_id", productId).put("branch_id", branchId)
-            Request.Builder().url("${SupabaseConfig.URL}/rest/v1/stock").post(body.toString().toRequestBody(jsonMedia))
-        } else {
-            Request.Builder().url("${SupabaseConfig.URL}/rest/v1/stock?product_id=eq.$productId&branch_id=eq.$branchId").patch(body.toString().toRequestBody(jsonMedia))
+        // 1. Try atomic RPC (multi-device safe)
+        val rpcBody = JSONObject()
+            .put("p_product_id", productId)
+            .put("p_branch_id", branchId)
+            .put("p_delta", inc)
+        val rpcReq = Request.Builder()
+            .url("${SupabaseConfig.URL}/rest/v1/rpc/increment_stock")
+            .post(rpcBody.toString().toRequestBody(jsonMedia))
+            .addHeader("apikey", SupabaseConfig.ANON_KEY)
+            .addHeader("Authorization", "Bearer ${bearer(accessToken)}")
+            .addHeader("Content-Type", "application/json")
+            .build()
+        val (rpcCode, _) = http(rpcReq)
+        if (rpcCode in 200..299) return
+        // 404 = function not yet created → fallback to read-modify-write
+
+        // 2. Fallback: read-modify-write with optimistic retry (up to 3 attempts)
+        for (attempt in 0..2) {
+            val old = getStockQty(productId, accessToken, branchId)
+            val newQty = (old ?: 0.0) + inc
+            val body = JSONObject().put("qty", newQty)
+            val builder = if (old == null) {
+                body.put("product_id", productId).put("branch_id", branchId)
+                Request.Builder()
+                    .url("${SupabaseConfig.URL}/rest/v1/stock")
+                    .post(body.toString().toRequestBody(jsonMedia))
+                    .addHeader("Prefer", "resolution=ignore-duplicates,return=minimal")
+            } else {
+                // Optimistic lock: WHERE qty = old — ป้องกัน race condition หลายเครื่อง
+                Request.Builder()
+                    .url("${SupabaseConfig.URL}/rest/v1/stock?product_id=eq.$productId&branch_id=eq.$branchId&qty=eq.$old")
+                    .patch(body.toString().toRequestBody(jsonMedia))
+                    .addHeader("Prefer", "return=representation")
+            }
+            val req = builder
+                .addHeader("apikey", SupabaseConfig.ANON_KEY)
+                .addHeader("Authorization", "Bearer ${bearer(accessToken)}")
+                .addHeader("Content-Type", "application/json")
+                .build()
+            val (code, raw) = http(req)
+            if (code !in 200..299) throw IllegalStateException("อัปเดต stock ไม่สำเร็จ ($code) $raw")
+            // PATCH คืน [] เมื่อ WHERE ไม่ตรง (row ถูก update ไปก่อนโดยเครื่องอื่น)
+            val updated = old == null || try { JSONArray(raw).length() > 0 } catch (_: Exception) { true }
+            if (updated) return
+            if (attempt < 2) kotlinx.coroutines.delay(80L * (attempt + 1))
         }
-        val req = builder.addHeader("apikey", SupabaseConfig.ANON_KEY).addHeader("Authorization", "Bearer ${bearer(accessToken)}").addHeader("Content-Type", "application/json").addHeader("Prefer", "return=minimal").build()
-        val (code, raw) = http(req)
-        if (code !in 200..299) throw IllegalStateException("อัปเดต stock ไม่สำเร็จ ($code) $raw")
+        throw IllegalStateException("อัปเดต stock ไม่สำเร็จ หลังลอง 3 ครั้ง (concurrent conflict)")
     }
 
     private suspend fun insertMovement(productId: Long, qty: Double, accessToken: String?, branchId: Long, branchName: String, userId: String, userName: String) {

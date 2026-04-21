@@ -1,5 +1,3 @@
-// ไฟล์: com/example/eob_rfid/ReceiveScreen.kt
-
 package ui
 
 import android.Manifest
@@ -37,7 +35,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.vector.rememberVectorPainter // ✅ เพิ่ม Import นี้
+import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -54,6 +52,8 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
+// ✅ Import AuthManager
+import data.AuthManager
 import data.ProductLite
 import data.SessionStore
 import data.StockReceivingApi
@@ -95,7 +95,8 @@ fun ReceiveScreen(onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
 
     val branchId = remember { SessionStore.getBranchId(context) }
-    val token = remember { SessionStore.getAccessToken(context) ?: "" }
+    // ❌ ลบบรรทัด val token = remember... ออก เพราะเราจะดึงใหม่สดๆ ทุกครั้ง
+
     val moneyFmt = remember { DecimalFormat("#,##0.00") }
     val qtyFmt = remember { DecimalFormat("#,##0.###") }
 
@@ -109,7 +110,6 @@ fun ReceiveScreen(onBack: () -> Unit) {
 
     fun upsertRow(p: ProductLite, codeUsed: String, inc: Int, stockBefore: Double) {
         val idx = rows.indexOfFirst { it.productId == p.id }
-        // ✅ ถ้าแก้ไฟล์ ProductLite แล้ว ตรงนี้จะหายแดง
         val imgUrl = p.image_url
 
         if (idx >= 0) {
@@ -134,6 +134,10 @@ fun ReceiveScreen(onBack: () -> Unit) {
             msg = null
             isError = false
             try {
+                // ✅ ใช้ AuthManager ดึง Token ล่าสุด (ถ้าหมดอายุ มันจะต่อให้เอง)
+                val token = AuthManager.getValidAccessToken(context)
+                if (token.isNullOrBlank()) throw Exception("กรุณาล็อกอินใหม่")
+
                 val p = SupabaseProductsApi.fetchByCode(c, token)
                 if (p == null) {
                     msg = "ไม่พบสินค้า: $c"; isError = true; return@launch
@@ -171,6 +175,10 @@ fun ReceiveScreen(onBack: () -> Unit) {
         scope.launch {
             saving = true; msg = null; isError = false
             try {
+                // ✅ ใช้ AuthManager ก่อนบันทึก
+                val token = AuthManager.getValidAccessToken(context)
+                if (token.isNullOrBlank()) throw Exception("กรุณาล็อกอินใหม่")
+
                 val ids = pending.map { it.productId }.distinct()
                 val currentMap = StockReceivingApi.fetchQtyMap(ids, branchId, token)
                 val updates = pending.map {
@@ -200,7 +208,6 @@ fun ReceiveScreen(onBack: () -> Unit) {
                     title = {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Text("รับสินค้าเข้า", fontWeight = FontWeight.Bold)
-                            // ✅ แก้ caption -> labelSmall (แก้ Error: Unresolved reference 'caption')
                             Text("Branch #$branchId", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
                         }
                     },
@@ -272,10 +279,9 @@ fun ReceiveScreen(onBack: () -> Unit) {
     }
 }
 
-// ------------------------
-// ✨ UI COMPONENTS ✨
-// ------------------------
-
+// ... (UI Components อื่นๆ คงเดิม ไม่ต้องแก้) ...
+// ... (InputHeader, StatusBanner, BottomActionBar, ModernReceiveCard, ModernQtyControl, EmptyState, Camera Logic) ...
+// ให้คงโค้ดส่วนล่างไว้เหมือนเดิมนะครับ เพราะไม่ได้มีการใช้ Token ในส่วน UI
 @Composable
 fun InputHeader(
     codeInput: String,
