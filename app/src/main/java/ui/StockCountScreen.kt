@@ -1,6 +1,8 @@
 package ui
 
 import android.Manifest
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -21,7 +23,6 @@ import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -38,14 +39,19 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-// ✅ Import AuthManager เพิ่มเข้ามา (เพื่อความถาวร)
+import androidx.compose.runtime.snapshotFlow
 import data.AuthManager
+import data.DraftDatabase
 import data.SessionManager
-
-// --- ✅ Import ให้ตรงกับ Demo จีน (คงเดิมทุกประการ) ---
-import com.xlzn.hcpda.uhf.UHFReader
 import data.SupabaseConfig
-// ---------------------------------
+
+// 👵🏼 Import ของเครื่องแรก (HC)
+import com.xlzn.hcpda.uhf.UHFReader
+
+// 👵🏼 Import ของเครื่องที่สอง (p8 - MagicRF)
+import android.hardware.UHFDevice
+import com.magicrf.uhfreaderlib.reader.UhfReader as MagicUhfReader
+import com.magicrf.uhfreaderlib.reader.Tools
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
@@ -61,7 +67,7 @@ import org.json.JSONObject
 import java.net.URLEncoder
 import java.time.Instant
 
-// --- THEME & COLORS (คงเดิม) ---
+// --- THEME & COLORS ---
 private val ColorPrimary = Color(0xFF4F46E5)
 private val ColorBg = Color(0xFFF1F5F9)
 private val ColorSurface = Color(0xFFFFFFFF)
@@ -75,10 +81,8 @@ private val GradientHeader = Brush.linearGradient(
     listOf(Color(0xFF6366F1), Color(0xFF4338CA))
 )
 
-private const val BURST_GUARD_MS = 100L
-private const val MIN_TOKEN_LEN = 4
-
 private enum class BannerStatus { NONE, OK, WARN, ERROR }
+
 
 private data class FoundTag(val rfid: String, val productId: Long, val productName: String?)
 private data class GroupRow(val productId: Long, val name: String, val qty: Long)
@@ -90,13 +94,22 @@ fun StockCountScreen(onBack: () -> Unit) {
     val lifecycleOwner = LocalLifecycleOwner.current
     val context = LocalContext.current
 
-    // --- SDK STATE (คงเดิม 100% ห้ามแตะ) ---
+    // --- SDK STATE ---
     var isReaderConnected by remember { mutableStateOf(false) }
-    var uhfReader by remember { mutableStateOf<UHFReader?>(null) }
-    var permissionGranted by remember { mutableStateOf(false) }
 
+    // ตัวแปรเก็บ Hardware ของเครื่อง HC
+    var hcReader by remember { mutableStateOf<UHFReader?>(null) }
+
+    // ตัวแปรเก็บ Hardware ของเครื่อง P8 (MagicRF)
+    var p8Device by remember { mutableStateOf<UHFDevice?>(null) }
+    var p8Reader by remember { mutableStateOf<MagicUhfReader?>(null) }
+
+    var currentDeviceType by remember { mutableStateOf(DeviceType.UNKNOWN) }
+    val deviceModel = remember { android.os.Build.MODEL }
+
+    var permissionGranted by remember { mutableStateOf(false) }
     var scanningOn by rememberSaveable { mutableStateOf(false) }
-    var bannerText by remember { mutableStateOf<String?>("กำลังตรวจสอบ Permission...") }
+    var bannerText by remember { mutableStateOf<String?>("Model: ${android.os.Build.MODEL} | Mfr: ${android.os.Build.MANUFACTURER}") }
     var bannerStatus by remember { mutableStateOf(BannerStatus.WARN) }
 
     var scanningBusy by remember { mutableStateOf(false) }
@@ -104,21 +117,29 @@ fun StockCountScreen(onBack: () -> Unit) {
     var confirming by remember { mutableStateOf(false) }
     var showCheckDialog by remember { mutableStateOf(false) }
 
-    // --- DATA STATE (คงเดิม) ---
-    val scannedList = rememberSaveable(
-        saver = listSaver(save = { it.toList() }, restore = { it.toMutableStateList() })
-    ) { mutableStateListOf<String>() }
+    val db = remember { DraftDatabase(context) }
+    val toneGen = remember { ToneGenerator(AudioManager.STREAM_MUSIC, ToneGenerator.MAX_VOLUME) }
+    DisposableEffect(Unit) { onDispose { try { toneGen.release() } catch (_: Exception) {} } }
+    var lastBeepMs = remember { 0L }
 
-    val scannedSet = remember { HashSet<String>() }
-    val queuedSet = remember { HashSet<String>() }
-    val lastBurstMs = remember { HashMap<String, Long>() }
-    var dupIgnored by rememberSaveable { mutableStateOf(0) }
+    fun beep() {
+        val now = System.currentTimeMillis()
+        if (now - lastBeepMs < 200) return   // cooldown — กัน startTone ซ้อนกัน
+        lastBeepMs = now
+        try { toneGen.startTone(ToneGenerator.TONE_PROP_BEEP, 120) } catch (_: Exception) {}
+    }
 
+    val scannedList  = remember { mutableStateListOf<String>() }   // unique ordered — ใช้ save/check/display
+    val scanLog      = remember { mutableStateListOf<String>() }   // ทุก scan — ใช้นับ total
+    val scanCountMap = remember { mutableStateMapOf<String, Int>() } // tag → จำนวนครั้ง
+    val scannedSet  = remember { HashSet<String>() }
+    val queuedSet   = remember { HashSet<String>() }
+    var dupIgnored by remember { mutableStateOf(0) }
+    var draftLoaded by remember { mutableStateOf(false) }
     var checked by remember { mutableStateOf(false) }
     var found by remember { mutableStateOf<List<FoundTag>>(emptyList()) }
     var missing by remember { mutableStateOf<List<String>>(emptyList()) }
     var resultTab by remember { mutableStateOf("GROUP") }
-
     val scanCh = remember { Channel<String>(capacity = 4096) }
 
     fun normalizeToken(raw: String): String {
@@ -130,16 +151,14 @@ fun StockCountScreen(onBack: () -> Unit) {
         if (!scanningOn) { bannerStatus = BannerStatus.NONE; bannerText = null }
     }
 
-    // -------------------------------------------------------------------------
-    // 1. Permission Request (คงเดิม)
-    // -------------------------------------------------------------------------
+    // 1. Permission Request
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
         val allGranted = permissions.values.all { it }
         if (allGranted) {
             permissionGranted = true
-            bannerText = "กำลังเชื่อมต่อ Hardware..."
+            bannerText = "กำลังตรวจสอบรุ่นเครื่อง Hardware..."
         } else {
             bannerStatus = BannerStatus.ERROR
             bannerText = "ต้องการ Permission เพื่อเชื่อมต่อ Hardware"
@@ -147,6 +166,18 @@ fun StockCountScreen(onBack: () -> Unit) {
     }
 
     LaunchedEffect(Unit) {
+        // โหลด draft tag ที่ค้างไว้จาก SQLite
+        val saved = withContext(Dispatchers.IO) { db.loadStockCountDraft() }
+        if (saved.isNotEmpty()) {
+            for (rfid in saved) {
+                if (scannedSet.add(rfid)) {
+                    queuedSet.add(rfid)
+                    scannedList.add(rfid)
+                }
+            }
+        }
+        draftLoaded = true
+
         permissionLauncher.launch(
             arrayOf(
                 Manifest.permission.READ_PHONE_STATE,
@@ -156,87 +187,128 @@ fun StockCountScreen(onBack: () -> Unit) {
         )
     }
 
-    // -------------------------------------------------------------------------
-    // 2. SDK INIT (คงเดิม 100% ห้ามแตะ)
-    // -------------------------------------------------------------------------
+    // Auto-save draft หลัง draftLoaded=true เท่านั้น ป้องกัน race condition
+    LaunchedEffect(draftLoaded) {
+        if (!draftLoaded) return@LaunchedEffect
+        snapshotFlow { scannedList.toList() }
+            .collect { current ->
+                withContext(Dispatchers.IO) { db.saveStockCountDraft(current) }
+            }
+    }
+
+    // 2. SDK INIT (แยกสายเชื่อมต่อ)
     LaunchedEffect(permissionGranted) {
         if (!permissionGranted) return@LaunchedEffect
 
         withContext(Dispatchers.IO) {
-            var retryCount = 0
-            val maxRetries = 3
-            var connected = false
 
-            while (retryCount < maxRetries && !connected) {
-                try {
-                    val reader = UHFReader.getInstance()
+            // ตรวจ model name — ถ้าไม่รู้จักให้ลอง HC ก่อน (ปลอดภัยกว่า MagicRF)
+            currentDeviceType = when {
+                deviceModel.contains("HC", ignoreCase = true) -> DeviceType.HC
+                deviceModel.contains("p8", ignoreCase = true) ||
+                deviceModel.contains("uhf", ignoreCase = true) ||
+                deviceModel.contains("magic", ignoreCase = true) -> DeviceType.P8_MAGICRF
+                else -> DeviceType.HC
+            }
 
-                    if (reader == null) {
-                        withContext(Dispatchers.Main) {
-                            bannerStatus = BannerStatus.ERROR
-                            bannerText = "ไม่พบ Hardware (Emulator Mode)"
+            withContext(Dispatchers.Main) {
+                bannerStatus = BannerStatus.WARN
+                bannerText = "Model: $deviceModel → ลอง ${currentDeviceType.name}..."
+            }
+
+            // ลอง HC
+            var hcOk = false
+            if (currentDeviceType == DeviceType.HC) {
+                var retry = 0
+                while (retry < 3 && !hcOk) {
+                    try {
+                        val reader = UHFReader.getInstance()
+                        if (reader == null) {
+                            withContext(Dispatchers.Main) { bannerStatus = BannerStatus.ERROR; bannerText = "ไม่พบ Hardware HC" }
+                            break
                         }
-                        return@withContext
-                    }
-
-                    uhfReader = reader
-                    delay(1000)
-
-                    val result = reader.connect(context)
-
-                    if (result?.data == true) {
-                        withContext(Dispatchers.Main) {
+                        hcReader = reader
+                        delay(1000)
+                        if (reader.connect(context)?.data == true) {
                             delay(500)
                             reader.setPower(30)
-
                             reader.setOnInventoryDataListener { tagsList ->
                                 if (!tagsList.isNullOrEmpty()) {
                                     for (tag in tagsList) {
                                         val rfid = tag.ecpHex
-                                        if (!rfid.isNullOrEmpty()) {
-                                            scanCh.trySend(normalizeToken(rfid))
-                                        }
+                                        if (!rfid.isNullOrEmpty()) scanCh.trySend(normalizeToken(rfid))
                                     }
                                 }
                             }
-
                             isReaderConnected = true
-                            bannerStatus = BannerStatus.OK
-                            bannerText = "พร้อมใช้งาน (Connected)"
+                            hcOk = true
+                            withContext(Dispatchers.Main) {
+                                bannerStatus = BannerStatus.OK
+                                bannerText = "พร้อมใช้งาน (HC | $deviceModel)"
+                            }
+                        } else {
+                            retry++
+                            withContext(Dispatchers.Main) { bannerText = "เชื่อมต่อ HC ไม่สำเร็จ (Retry $retry)..." }
+                            delay(1500)
                         }
-                        connected = true
-                    } else {
-                        retryCount++
-                        withContext(Dispatchers.Main) {
-                            bannerText = "เชื่อมต่อไม่สำเร็จ (Retry $retryCount)..."
-                        }
+                    } catch (t: Throwable) {
+                        Log.e("UHF_INIT", "HC Error: ${t.message}", t)
+                        retry++
+                        withContext(Dispatchers.Main) { bannerStatus = BannerStatus.ERROR; bannerText = "HC Error: ${t.localizedMessage}" }
                         delay(1500)
                     }
+                }
+            }
+
+            // ลอง MagicRF (ถ้า P8 หรือ HC ไม่สำเร็จ)
+            if (!hcOk && (currentDeviceType == DeviceType.P8_MAGICRF || !isReaderConnected)) {
+                try {
+                    withContext(Dispatchers.Main) { bannerStatus = BannerStatus.WARN; bannerText = "กำลังเชื่อมต่อ MagicRF..." }
+                    currentDeviceType = DeviceType.P8_MAGICRF
+                    val device = UHFDevice(context)
+                    device.UhfOpen()
+                    MagicUhfReader.setPortPath(device.SerialDev())
+                    val reader = MagicUhfReader.getInstance()
+                    if (reader != null) {
+                        p8Device = device
+                        p8Reader = reader
+                        isReaderConnected = true
+                        withContext(Dispatchers.Main) {
+                            bannerStatus = BannerStatus.OK
+                            bannerText = "พร้อมใช้งาน (MagicRF | $deviceModel)"
+                        }
+                    } else {
+                        withContext(Dispatchers.Main) { bannerStatus = BannerStatus.ERROR; bannerText = "SerialPort Init Fail" }
+                    }
                 } catch (t: Throwable) {
-                    Log.e("UHF_INIT", "Error: ${t.message}", t)
-                    retryCount++
+                    Log.e("UHF_INIT", "MagicRF Error: ${t.message}", t)
+                    currentDeviceType = DeviceType.UNKNOWN
                     withContext(Dispatchers.Main) {
                         bannerStatus = BannerStatus.ERROR
-                        bannerText = "Emulator/Error: ${t.localizedMessage}"
+                        bannerText = "ไม่รองรับ Hardware บนเครื่อง: $deviceModel"
                     }
-                    delay(2000)
                 }
             }
         }
     }
 
-    // --- LIFECYCLE CLEANUP (คงเดิม) ---
+    // --- LIFECYCLE CLEANUP ---
     DisposableEffect(lifecycleOwner) {
         onDispose {
             try {
                 scanningOn = false
-                uhfReader?.stopInventory()
-                uhfReader?.disConnect()
+                if (currentDeviceType == DeviceType.HC) {
+                    hcReader?.stopInventory()
+                    hcReader?.disConnect()
+                } else if (currentDeviceType == DeviceType.P8_MAGICRF) {
+                    p8Reader?.close()
+                    p8Device?.UhfStop()
+                }
             } catch (e: Exception) { }
         }
     }
 
-    // --- SCAN CONTROL (คงเดิม) ---
+    // --- SCAN CONTROL ---
     LaunchedEffect(scanningOn) {
         if (!isReaderConnected) return@LaunchedEffect
 
@@ -245,12 +317,39 @@ fun StockCountScreen(onBack: () -> Unit) {
                 resetResultsBecauseNewScan()
                 bannerStatus = BannerStatus.OK
                 bannerText = "กำลังยิงสัญญาณ RFID..."
-                uhfReader?.startInventory()
+
+                if (currentDeviceType == DeviceType.HC) {
+                    hcReader?.startInventory()
+                } else if (currentDeviceType == DeviceType.P8_MAGICRF) {
+                    // 🔵 เครื่อง P8 ต้องเขียนลูปวนถามข้อมูล (Polling)
+                    while (scanningOn) {
+                        withContext(Dispatchers.IO) {
+                            val epcList = p8Reader?.inventoryRealTime()
+                            if (epcList != null && epcList.isNotEmpty()) {
+                                for (epc in epcList) {
+                                    if (epc != null) {
+                                        val epcStr = Tools.Bytes2HexString(epc, epc.size)
+                                        scanCh.trySend(normalizeToken(epcStr))
+                                    }
+                                }
+                            }
+                            delay(80) // ดีเลย์ตามโค้ดโรงงาน
+                        }
+                    }
+                }
+
             } else {
-                uhfReader?.stopInventory()
+                if (currentDeviceType == DeviceType.HC) {
+                    hcReader?.stopInventory()
+                }
+                // เครื่อง P8 ไม่ต้องทำอะไร แค่ค่า scanningOn เป็น false ลูปข้างบนก็จะหยุดเองจ้ะ
+
                 bannerStatus = BannerStatus.NONE
                 bannerText = null
             }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // coroutine ถูก cancel ตามปกติ (เช่น กดหยุดยิง) — ไม่ใช่ error ไม่ต้องแสดงอะไร
+            throw e
         } catch (e: Exception) {
             scanningOn = false
             bannerStatus = BannerStatus.ERROR
@@ -258,29 +357,33 @@ fun StockCountScreen(onBack: () -> Unit) {
         }
     }
 
-    // --- DATA PROCESSOR (คงเดิม) ---
+    // --- DATA PROCESSOR ---
     LaunchedEffect(Unit) {
         for (tag in scanCh) {
             scanningBusy = true
             if (checked) resetResultsBecauseNewScan()
 
-            if (!queuedSet.contains(tag)) {
+            // นับทุก scan (รวมซ้ำ)
+            scanLog.add(tag)
+            scanCountMap[tag] = (scanCountMap[tag] ?: 0) + 1
+
+            if (!scannedSet.contains(tag)) {
+                scannedSet.add(tag)
                 queuedSet.add(tag)
-                if (!scannedSet.contains(tag)) {
-                    scannedSet.add(tag)
-                    scannedList.add(0, tag)
-                } else {
-                    dupIgnored += 1
-                }
+                scannedList.add(0, tag)  // ใหม่สุดขึ้นบน
+                beep()
+            } else {
+                dupIgnored += 1
             }
             scanningBusy = false
         }
     }
 
     fun clearAll() {
-        scannedList.clear(); scannedSet.clear(); queuedSet.clear(); lastBurstMs.clear()
+        scannedList.clear(); scanLog.clear(); scanCountMap.clear(); scannedSet.clear(); queuedSet.clear()
         dupIgnored = 0; checked = false; found = emptyList(); missing = emptyList()
         resultTab = "GROUP"; bannerStatus = BannerStatus.NONE; bannerText = null
+        scope.launch(Dispatchers.IO) { db.clearStockCountDraft() }
     }
 
     fun groupedFound(): List<GroupRow> {
@@ -289,17 +392,12 @@ fun StockCountScreen(onBack: () -> Unit) {
         }.sortedWith(compareByDescending<GroupRow> { it.qty }.thenBy { it.productId })
     }
 
-    // -------------------------------------------------------------------------
-    // ✅ จุดแก้ไขที่ 1: ใช้ AuthManager ในฟังก์ชันตรวจสอบ
-    // -------------------------------------------------------------------------
     suspend fun doCheck() {
         if (checking || confirming) return
         if (scannedList.isEmpty()) { bannerStatus = BannerStatus.WARN; bannerText = "ยังไม่มีข้อมูล"; return }
         checking = true; bannerStatus = BannerStatus.NONE; bannerText = null
         try {
-            // 👇 แก้บรรทัดนี้: เรียก AuthManager.getValidAccessToken(context)
             val validToken = AuthManager.getValidAccessToken(context)
-
             val results = SupabaseBatchCheckApi.lookupMany(scannedList.toList(), validToken)
             found = results; missing = scannedList.filter { tag -> results.none { it.rfid == tag } }
             checked = true; resultTab = "GROUP"
@@ -309,27 +407,22 @@ fun StockCountScreen(onBack: () -> Unit) {
         } finally { checking = false }
     }
 
-    // -------------------------------------------------------------------------
-    // ✅ จุดแก้ไขที่ 2: ใช้ AuthManager ในฟังก์ชันบันทึก
-    // -------------------------------------------------------------------------
     suspend fun confirmToReaderStock() {
         if (confirming || checking || !checked || found.isEmpty()) return
         confirming = true; bannerStatus = BannerStatus.NONE; bannerText = null
         try {
             val groups = groupedFound()
-
-            // 👇 แก้บรรทัดนี้: เรียก AuthManager.getValidAccessToken(context)
             val validToken = AuthManager.getValidAccessToken(context)
-
             SupabaseReaderStockApi.upsertFromCounts(groups, validToken)
             bannerStatus = BannerStatus.OK; bannerText = "บันทึกสต๊อกเรียบร้อย (${groups.size} รายการ)"
+            withContext(Dispatchers.IO) { db.clearStockCountDraft() }
             clearAll()
         } catch (e: Exception) {
             bannerStatus = BannerStatus.ERROR; bannerText = e.message ?: "Error"
         } finally { confirming = false }
     }
 
-    // --- UI CODE (คงเดิม) ---
+    // --- UI CODE ---
     Scaffold(
         containerColor = ColorBg,
         topBar = {
@@ -362,8 +455,7 @@ fun StockCountScreen(onBack: () -> Unit) {
                 color = ColorSurface,
                 shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
             ) {
-                Column(Modifier.padding(16.dp).navigationBarsPadding()) {
-                    // Banner
+                Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp).navigationBarsPadding()) {
                     AnimatedVisibility(visible = bannerText != null && bannerStatus != BannerStatus.NONE) {
                         val (bg, txt, icon) = when (bannerStatus) {
                             BannerStatus.OK -> Triple(ColorSuccess.copy(0.1f), ColorSuccess, Icons.Rounded.CheckCircle)
@@ -372,18 +464,17 @@ fun StockCountScreen(onBack: () -> Unit) {
                             else -> Triple(Color.Gray.copy(0.1f), Color.Gray, Icons.Rounded.Info)
                         }
                         Row(
-                            Modifier.fillMaxWidth().padding(bottom = 12.dp)
-                                .background(bg, RoundedCornerShape(12.dp)).padding(12.dp),
+                            Modifier.fillMaxWidth().padding(bottom = 8.dp)
+                                .background(bg, RoundedCornerShape(10.dp)).padding(8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(icon, null, tint = txt)
-                            Spacer(Modifier.width(8.dp))
-                            Text(bannerText ?: "", color = txt, fontWeight = FontWeight.Medium, fontSize = 14.sp)
+                            Icon(icon, null, tint = txt, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(bannerText ?: "", color = txt, fontWeight = FontWeight.Medium, fontSize = 12.sp)
                         }
                     }
 
-                    // Buttons
-                    Row(Modifier.height(56.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(Modifier.height(42.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         val scanColor by animateColorAsState(if (scanningOn) ColorError else ColorPrimary)
                         Button(
                             onClick = {
@@ -394,40 +485,45 @@ fun StockCountScreen(onBack: () -> Unit) {
                                 }
                             },
                             modifier = Modifier.weight(1f).fillMaxHeight(),
-                            shape = RoundedCornerShape(16.dp),
+                            shape = RoundedCornerShape(12.dp),
                             colors = ButtonDefaults.buttonColors(containerColor = scanColor),
-                            enabled = !checking && !confirming
+                            enabled = !checking && !confirming,
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp)
                         ) {
-                            Icon(if (scanningOn) Icons.Rounded.Stop else Icons.Rounded.QrCodeScanner, null)
-                            Spacer(Modifier.width(8.dp))
-                            Text(if (scanningOn) "หยุดนับ" else "เริ่มนับ", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                            Icon(if (scanningOn) Icons.Rounded.Stop else Icons.Rounded.QrCodeScanner, null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(if (scanningOn) "หยุดนับ" else "เริ่มนับ", fontSize = 13.sp, fontWeight = FontWeight.Bold)
                         }
 
                         if (checked) {
                             Button(
                                 onClick = { scope.launch { confirmToReaderStock() } },
                                 modifier = Modifier.weight(1f).fillMaxHeight(),
-                                shape = RoundedCornerShape(16.dp),
+                                shape = RoundedCornerShape(12.dp),
                                 colors = ButtonDefaults.buttonColors(containerColor = ColorSuccess),
-                                enabled = found.isNotEmpty() && !confirming
+                                enabled = found.isNotEmpty() && !confirming,
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp)
                             ) {
-                                if (confirming) CircularProgressIndicator(color = Color.White, modifier = Modifier.size(24.dp))
+                                if (confirming) CircularProgressIndicator(color = Color.White, modifier = Modifier.size(18.dp))
                                 else {
-                                    Icon(Icons.Rounded.Save, null); Spacer(Modifier.width(8.dp))
-                                    Text("บันทึก", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                                    Icon(Icons.Rounded.Save, null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("บันทึก", fontSize = 13.sp, fontWeight = FontWeight.Bold)
                                 }
                             }
                         } else {
                             FilledTonalButton(
                                 onClick = { showCheckDialog = true },
                                 modifier = Modifier.weight(1f).fillMaxHeight(),
-                                shape = RoundedCornerShape(16.dp),
-                                enabled = scannedList.isNotEmpty() && !checking
+                                shape = RoundedCornerShape(12.dp),
+                                enabled = scannedList.isNotEmpty() && !checking,
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp)
                             ) {
-                                if (checking) CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
+                                if (checking) CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
                                 else {
-                                    Icon(Icons.Rounded.FactCheck, null); Spacer(Modifier.width(8.dp))
-                                    Text("ตรวจสอบ", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                                    Icon(Icons.Rounded.FactCheck, null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("ตรวจสอบ", fontSize = 13.sp, fontWeight = FontWeight.Bold)
                                 }
                             }
                         }
@@ -437,67 +533,91 @@ fun StockCountScreen(onBack: () -> Unit) {
         }
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
-            // Dashboard (คงเดิม)
-            Box(
-                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)
-                    .shadow(12.dp, RoundedCornerShape(24.dp), spotColor = ColorPrimary.copy(0.4f))
-                    .clip(RoundedCornerShape(24.dp))
-                    .background(GradientHeader)
-            ) {
-                Box(Modifier.offset((-30).dp, (-30).dp).size(150.dp).alpha(0.1f).background(Color.White, CircleShape))
-                Box(Modifier.align(Alignment.BottomEnd).offset(50.dp, 50.dp).size(200.dp).alpha(0.1f).background(Color.White, CircleShape))
 
-                Row(
-                    Modifier.padding(24.dp).fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column {
-                        Text("จำนวนที่อ่านได้ (Total)", color = Color.White.copy(0.8f), fontSize = 14.sp)
-                        Text("${scannedList.size}", color = Color.White, fontSize = 56.sp, fontWeight = FontWeight.ExtraBold)
+            // ── Compact Stats Bar ─────────────────────────────────────────────
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(GradientHeader)
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                // ── total reads ──
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("R", color = Color.White.copy(0.75f), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                    Text("${scanLog.size}", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 22.sp)
+                }
+                // ── divider ──
+                Box(Modifier.width(1.dp).height(28.dp).background(Color.White.copy(0.3f)))
+                // ── unique count ──
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("I", color = Color.White.copy(0.75f), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                    Text("${scannedList.size}", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 22.sp)
+                }
+
+                Spacer(Modifier.weight(1f))
+
+                // ── pulse icon ──
+                Box(contentAlignment = Alignment.Center, modifier = Modifier.size(40.dp)) {
+                    if (scanningOn) {
+                        val infiniteTransition = rememberInfiniteTransition()
+                        val scale by infiniteTransition.animateFloat(1f, 1.5f, infiniteRepeatable(tween(800), RepeatMode.Restart))
+                        val alpha by infiniteTransition.animateFloat(0.5f, 0f, infiniteRepeatable(tween(800), RepeatMode.Restart))
+                        Box(Modifier.size(40.dp).scale(scale).alpha(alpha).background(Color.White, CircleShape))
                     }
-                    Box(contentAlignment = Alignment.Center) {
-                        if (scanningOn) {
-                            val infiniteTransition = rememberInfiniteTransition()
-                            val scale by infiniteTransition.animateFloat(
-                                initialValue = 1f, targetValue = 1.5f,
-                                animationSpec = infiniteRepeatable(tween(1000), RepeatMode.Restart)
-                            )
-                            val alpha by infiniteTransition.animateFloat(
-                                initialValue = 0.5f, targetValue = 0f,
-                                animationSpec = infiniteRepeatable(tween(1000), RepeatMode.Restart)
-                            )
-                            Box(Modifier.size(50.dp).scale(scale).alpha(alpha).background(Color.White, CircleShape))
-                        }
-                        Box(
-                            Modifier.size(56.dp)
-                                .background(Color.White.copy(0.2f), CircleShape)
-                                .border(1.dp, Color.White.copy(0.3f), CircleShape),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(if (scanningBusy) Icons.Rounded.Downloading else Icons.Rounded.Inventory2, null, tint = Color.White, modifier = Modifier.size(28.dp))
-                        }
+                    Box(
+                        Modifier.size(40.dp).background(Color.White.copy(0.2f), CircleShape).border(1.dp, Color.White.copy(0.3f), CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(if (scanningBusy) Icons.Rounded.Downloading else Icons.Rounded.Inventory2, null, tint = Color.White, modifier = Modifier.size(20.dp))
                     }
                 }
             }
 
-            // List Content (คงเดิม)
             LazyColumn(
-                contentPadding = PaddingValues(bottom = 20.dp, start = 10.dp, end = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                contentPadding = PaddingValues(bottom = 20.dp, start = 8.dp, end = 8.dp, top = 2.dp),
+                verticalArrangement = Arrangement.spacedBy(3.dp)
             ) {
                 if (!checked) {
-                    itemsIndexed(scannedList) { _, tag ->
+                    itemsIndexed(scannedList, key = { _, tag -> tag }) { idx, tag ->
+                        val count = scanCountMap[tag] ?: 1
                         Card(
                             modifier = Modifier.fillMaxWidth(),
-                            colors = CardDefaults.cardColors(containerColor = ColorSurface),
+                            colors = CardDefaults.cardColors(containerColor = if (idx == 0) ColorSuccess.copy(0.05f) else ColorSurface),
                             shape = RoundedCornerShape(8.dp),
-                            elevation = CardDefaults.cardElevation(1.dp)
+                            elevation = CardDefaults.cardElevation(0.dp)
                         ) {
-                            Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.Rounded.QrCode, null, tint = ColorPrimary, modifier = Modifier.size(24.dp))
-                                Spacer(Modifier.width(12.dp))
-                                Text(tag, fontSize = 16.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Medium)
+                            Row(
+                                Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    "#${scannedList.size - idx}",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = ColorPrimary,
+                                    modifier = Modifier.width(34.dp)
+                                )
+                                Text(
+                                    tag,
+                                    fontSize = 13.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.Medium,
+                                    color = ColorTextMain,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                if (count > 1) {
+                                    Text(
+                                        "×$count",
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = ColorWarning
+                                    )
+                                }
                             }
                         }
                     }
@@ -581,9 +701,6 @@ fun ResultRow(title: String, subtitle: String, isSuccess: Boolean) {
         }
     }
 }
-
-// ... (API Objects: SupabaseBatchCheckApi, SupabaseReaderStockApi ใช้ของเดิมได้เลยครับ ไม่ต้องแก้) ...
-// (เพื่อความชัวร์ ผมขอแปะให้ครบเพื่อให้ก๊อปทีเดียวจบครับ)
 
 private object SupabaseBatchCheckApi {
     private val client = OkHttpClient()

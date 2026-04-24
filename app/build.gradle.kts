@@ -82,7 +82,11 @@ dependencies {
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
 
     // โหลดไฟล์ .aar/.jar จาก libs (เผื่อไว้ให้ SDK จีน)
-    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.jar", "*.aar"))))
+    // โหลดไฟล์ .aar ปกติ
+    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar"))))
+
+    // 💡 บังคับให้โหลด UHFDevice.jar แบบพิเศษ (compileOnly)
+    compileOnly(files("libs/UHFDevice.jar"))
 
     // Testing
     testImplementation(libs.junit)

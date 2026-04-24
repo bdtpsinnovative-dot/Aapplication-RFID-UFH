@@ -14,7 +14,8 @@ data class StockReceivingItem(
     val updatedAt: String?,
     val name: String?,
     val barcode: String?,
-    val sku: String?
+    val sku: String?,
+    val imageUrl: String? = null
 )
 
 object StockReceivingBrowseApi {
@@ -65,12 +66,19 @@ object StockReceivingBrowseApi {
             }
         }
 
-    private suspend fun fetchProductsMap(ids: List<Long>, accessToken: String?): Map<Long, Triple<String?, String?, String?>> =
+    private data class ProductInfo(
+        val name: String?,
+        val barcode: String?,
+        val sku: String?,
+        val imageUrl: String?
+    )
+
+    private suspend fun fetchProductsMap(ids: List<Long>, accessToken: String?): Map<Long, ProductInfo> =
         withContext(Dispatchers.IO) {
             if (ids.isEmpty()) return@withContext emptyMap()
 
             val bearer = accessToken?.takeIf { it.isNotBlank() } ?: SupabaseConfig.ANON_KEY
-            val map = HashMap<Long, Triple<String?, String?, String?>>()
+            val map = HashMap<Long, ProductInfo>()
 
             // กัน URL ยาวเกิน: chunk ทีละ 200 id
             val chunkSize = 200
@@ -80,7 +88,7 @@ object StockReceivingBrowseApi {
                 val url = "${SupabaseConfig.URL}/rest/v1/products"
                     .toHttpUrl()
                     .newBuilder()
-                    .addQueryParameter("select", "id,name,barcode,sku")
+                    .addQueryParameter("select", "id,name,barcode,sku,image_url")
                     .addQueryParameter("id", "in.(${chunk.joinToString(",")})")
                     .build()
 
@@ -104,7 +112,8 @@ object StockReceivingBrowseApi {
                         val name = o.optString("name").ifBlank { null }
                         val barcode = o.optString("barcode").ifBlank { null }
                         val sku = o.optString("sku").ifBlank { null }
-                        map[id] = Triple(name, barcode, sku)
+                        val imageUrl = o.optString("image_url").ifBlank { null }
+                        map[id] = ProductInfo(name, barcode, sku, imageUrl)
                     }
                 }
             }
@@ -118,14 +127,15 @@ object StockReceivingBrowseApi {
             val pmap = fetchProductsMap(ids, accessToken)
 
             stock.map { (pid, qty, updated) ->
-                val (name, barcode, sku) = pmap[pid] ?: Triple(null, null, null)
+                val info = pmap[pid]
                 StockReceivingItem(
                     productId = pid,
                     qty = qty,
                     updatedAt = updated,
-                    name = name,
-                    barcode = barcode,
-                    sku = sku
+                    name = info?.name,
+                    barcode = info?.barcode,
+                    sku = info?.sku,
+                    imageUrl = info?.imageUrl
                 )
             }
         }

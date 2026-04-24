@@ -21,11 +21,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import navigation.Routes
 
+// ✅ เพิ่ม isEnabled เข้าไปเพื่อใช้เช็คสถานะการเปิด/ปิดเมนู
 private data class MoreMenuItem(
     val title: String,
     val subtitle: String,
     val route: String,
-    val icon: ImageVector
+    val icon: ImageVector,
+    val isEnabled: Boolean = false
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -40,37 +42,43 @@ fun Other2Screen(
                 title = "โอนสินค้า",
                 subtitle = "ย้ายสต๊อกระหว่างคลัง/สาขา",
                 route = Routes.MORE_TRANSFER,
-                icon = Icons.Outlined.SwapHoriz
+                icon = Icons.Outlined.SwapHoriz,
+                isEnabled = false
             ),
             MoreMenuItem(
                 title = "จัดเรียงสินค้า",
                 subtitle = "จัดหมวดหมู่/เรียงลำดับการแสดงผล",
                 route = Routes.MORE_ARRANGE,
-                icon = Icons.Outlined.Sort
+                icon = Icons.Outlined.Sort,
+                isEnabled = false
             ),
             MoreMenuItem(
                 title = "นับสินค้าตั้งต้น",
                 subtitle = "เริ่มต้นยอดนับครั้งแรกสำหรับระบบ",
                 route = Routes.MORE_INITIAL_COUNT,
-                icon = Icons.Outlined.Inventory2
+                icon = Icons.Outlined.Inventory2,
+                isEnabled = true // ✅ เปิดให้กดได้แค่อันนี้อันเดียวครับนาย
             ),
             MoreMenuItem(
                 title = "สินค้าเสียหาย",
                 subtitle = "บันทึกของเสีย/แตก/หมดอายุ",
                 route = Routes.MORE_DAMAGE,
-                icon = Icons.Outlined.ReportProblem
+                icon = Icons.Outlined.ReportProblem,
+                isEnabled = false
             ),
             MoreMenuItem(
                 title = "รายการปัญหา",
                 subtitle = "แจ้งปัญหา/ติดตามการแก้ไข",
                 route = Routes.MORE_ISSUES,
-                icon = Icons.Outlined.SupportAgent
+                icon = Icons.Outlined.SupportAgent,
+                isEnabled = false
             ),
             MoreMenuItem(
                 title = "อัพเดตระบบ",
                 subtitle = "ตรวจสอบเวอร์ชันและอัปเดต",
                 route = Routes.MORE_UPDATE_SYSTEM,
-                icon = Icons.Outlined.SystemUpdateAlt
+                icon = Icons.Outlined.SystemUpdateAlt,
+                isEnabled = false
             )
         )
     }
@@ -89,7 +97,6 @@ fun Other2Screen(
 
     Scaffold(
         topBar = {
-            // ✅ Top bar แบบโปร + มีพื้นหลัง gradient
             Box(
                 Modifier
                     .fillMaxWidth()
@@ -145,7 +152,8 @@ fun Other2Screen(
                     title = item.title,
                     subtitle = item.subtitle,
                     icon = item.icon,
-                    onClick = { onGo(item.route) }
+                    isEnabled = item.isEnabled, // ✅ ส่งสถานะไปที่ Card
+                    onClick = { if (item.isEnabled) onGo(item.route) } // ✅ เช็คก่อนให้กดเปลี่ยนหน้า
                 )
             }
 
@@ -160,13 +168,18 @@ private fun AdminMenuCard(
     title: String,
     subtitle: String,
     icon: ImageVector,
+    isEnabled: Boolean, // ✅ รับค่าสถานะ
     onClick: () -> Unit
 ) {
+    // ปรับสีพื้นหลังเงาตามสถานะเปิด/ปิด
+    val containerColor = if (isEnabled) Color.White else Color(0xFFF0F0F0)
+
     Card(
-        onClick = onClick,
+        onClick = { if (isEnabled) onClick() },
+        enabled = isEnabled, // ปิดเอฟเฟกต์การกดถ้ายังไม่เปิดใช้
         shape = RoundedCornerShape(18.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        colors = CardDefaults.cardColors(containerColor = containerColor),
+        elevation = CardDefaults.cardElevation(defaultElevation = if (isEnabled) 2.dp else 0.dp),
         modifier = Modifier.fillMaxWidth()
     ) {
         Row(
@@ -175,12 +188,13 @@ private fun AdminMenuCard(
                 .padding(horizontal = 14.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // ไอคอนในกรอบสวยๆ
+            // ไอคอนในกรอบ
             Box(
                 modifier = Modifier
                     .size(44.dp)
                     .background(
-                        MaterialTheme.colorScheme.primary.copy(alpha = 0.10f),
+                        if (isEnabled) MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)
+                        else Color.Gray.copy(alpha = 0.15f),
                         RoundedCornerShape(14.dp)
                     ),
                 contentAlignment = Alignment.Center
@@ -188,34 +202,56 @@ private fun AdminMenuCard(
                 Icon(
                     icon,
                     contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary
+                    tint = if (isEnabled) MaterialTheme.colorScheme.primary else Color.Gray
                 )
             }
 
             Spacer(Modifier.width(12.dp))
 
             Column(Modifier.weight(1f)) {
-                Text(
-                    title,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.ExtraBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        title,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = if (isEnabled) Color.Unspecified else Color.Gray,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+
+                    // ✅ แสดงป้าย "เร็วๆ นี้" ถ้าปุ่มยังล็อคอยู่
+                    if (!isEnabled) {
+                        Spacer(Modifier.width(8.dp))
+                        Surface(
+                            color = Color.LightGray.copy(alpha = 0.4f),
+                            shape = RoundedCornerShape(4.dp)
+                        ) {
+                            Text(
+                                text = "เร็วๆ นี้",
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.DarkGray
+                            )
+                        }
+                    }
+                }
+
                 Spacer(Modifier.height(2.dp))
                 Text(
                     subtitle,
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = if (isEnabled) MaterialTheme.colorScheme.onSurfaceVariant else Color.Gray.copy(alpha = 0.8f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
             }
 
+            // ✅ เปลี่ยนไอคอนด้านหลังเป็นแม่กุญแจถ้าปุ่มล็อค
             Icon(
-                Icons.Outlined.ChevronRight,
+                if (isEnabled) Icons.Outlined.ChevronRight else Icons.Outlined.Lock,
                 contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                modifier = Modifier.size(20.dp),
+                tint = if (isEnabled) MaterialTheme.colorScheme.onSurfaceVariant else Color.Gray.copy(alpha = 0.5f)
             )
         }
     }

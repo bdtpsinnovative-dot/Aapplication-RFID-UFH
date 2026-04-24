@@ -14,7 +14,8 @@ object AuthManager {
     private val jsonMedia = "application/json; charset=utf-8".toMediaType()
 
     // ฟังก์ชันพระเอก: ขอ Token ที่ใช้งานได้แน่นอน (ถ้าหมดอายุก็ต่อให้เอง)
-    suspend fun getValidAccessToken(ctx: Context): String? {
+    // forceRefresh = true → บังคับ refresh ทันทีโดยไม่เช็คเวลา (ใช้ตอน server บอกว่า JWT expired)
+    suspend fun getValidAccessToken(ctx: Context, forceRefresh: Boolean = false): String? {
         // 1. ลองดูใน RAM (SessionManager) ก่อน
         var token = SessionManager.accessToken
 
@@ -28,8 +29,8 @@ object AuthManager {
             }
         }
 
-        // 3. เช็คว่าหมดอายุหรือยัง?
-        if (SessionStore.isTokenExpired(ctx)) {
+        // 3. เช็คว่าหมดอายุหรือยัง? (หรือถูกบังคับ refresh)
+        if (forceRefresh || SessionStore.isTokenExpired(ctx)) {
             // ⚠️ หมดอายุแล้ว! ต้องต่ออายุ (Refresh)
             val refreshToken = SessionStore.getRefreshToken(ctx) ?: return null // ถ้าไม่มีใบต่ออายุก็ช่วยไม่ได้
 
