@@ -18,4 +18,15 @@ object Routes {
     const val MORE_ISSUES = "more_issues"
     const val MORE_UPDATE_SYSTEM = "more_update_system"
 
+    const val LOT_SELECT  = "lot_select"
+    const val LOT_MENU    = "lot_menu/{lotId}/{lotCode}"
+    const val LOT_RECEIVE = "lot_receive/{lotId}/{lotCode}"
+    const val LOT_CHECK   = "lot_check/{lotId}/{lotCode}"
+
+    fun lotMenu(lotId: Long, lotCode: String)    = "lot_menu/$lotId/${lotCode.encodeUrl()}"
+    fun lotReceive(lotId: Long, lotCode: String) = "lot_receive/$lotId/${lotCode.encodeUrl()}"
+    fun lotCheck(lotId: Long, lotCode: String)   = "lot_check/$lotId/${lotCode.encodeUrl()}"
 }
+
+private fun String.encodeUrl() =
+    java.net.URLEncoder.encode(this, "UTF-8")

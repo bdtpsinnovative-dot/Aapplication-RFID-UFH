@@ -10,11 +10,12 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 
-// DTO สำหรับส่งข้อมูลไป update
+// 💡 DTO สำหรับส่งข้อมูลไป update (เพิ่ม lotId)
 data class StockUpdateDto(
     val branch_id: Long,
     val product_id: Long,
-    val qty: Double
+    val qty: Double,
+    val lot_id: Long? = null // 👈 เพิ่ม lot_id (เป็น null ได้ ถ้ารับเข้านอกลอต)
 )
 
 object StockReceivingApi {
@@ -48,13 +49,14 @@ object StockReceivingApi {
             }
         }
 
-    // 2. ดึง Map สต็อกหลายรายการเพื่อเช็คก่อนบันทึก (ต้องระบุ branchId)
-    suspend fun fetchQtyMap(productIds: List<Long>, branchId: Long, accessToken: String): Map<Long, Double> =
+    // 2. ดึง Map สต็อกหลายรายการเพื่อเช็คก่อนบันทึก (filter ตาม lotId ด้วย เพื่อกัน row ซ้ำ)
+    suspend fun fetchQtyMap(productIds: List<Long>, branchId: Long, accessToken: String, lotId: Long? = null): Map<Long, Double> =
         withContext(Dispatchers.IO) {
             if (productIds.isEmpty()) return@withContext emptyMap()
 
             val idsStr = productIds.joinToString(",")
-            val url = "$baseUrl/rest/v1/stock_receiving?product_id=in.($idsStr)&branch_id=eq.$branchId&select=product_id,qty"
+            val lotFilter = if (lotId != null) "&lot_id=eq.$lotId" else "&lot_id=is.null"
+            val url = "$baseUrl/rest/v1/stock_receiving?product_id=in.($idsStr)&branch_id=eq.$branchId$lotFilter&select=product_id,qty"
 
             val req = Request.Builder()
                 .url(url)
@@ -79,12 +81,14 @@ object StockReceivingApi {
             map
         }
 
-    // 3. บันทึกสต็อก (Upsert โดยมี branch_id)
+    // 3. บันทึกสต็อก (Upsert โดยมี branch_id และ lot_id)
     suspend fun upsertStockList(updates: List<StockUpdateDto>, accessToken: String) =
         withContext(Dispatchers.IO) {
             if (updates.isEmpty()) return@withContext
 
-            val url = "$baseUrl/rest/v1/stock_receiving"
+            // on_conflict บอก PostgREST ให้ใช้ unique constraint (branch_id, product_id, lot_id)
+            // ไม่ใช่ surrogate PK "id" ที่เพิ่มมา
+            val url = "$baseUrl/rest/v1/stock_receiving?on_conflict=branch_id,product_id,lot_id"
 
             // แปลง DTO เป็น JSON Array
             val jsonArray = JSONArray()
@@ -93,6 +97,14 @@ object StockReceivingApi {
                 j.put("branch_id", u.branch_id)
                 j.put("product_id", u.product_id)
                 j.put("qty", u.qty)
+
+                // 💡 เพิ่ม lot_id เข้าไปใน JSON
+                if (u.lot_id != null) {
+                    j.put("lot_id", u.lot_id)
+                } else {
+                    j.put("lot_id", JSONObject.NULL) // ถ้าไม่มี ส่ง null เข้าดาต้าเบส
+                }
+
                 jsonArray.put(j)
             }
 

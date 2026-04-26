@@ -11,6 +11,7 @@ import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -60,14 +61,18 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import data.AppError
 import data.AuthManager
 import data.DraftDatabase
+import data.LotSummary
 import data.SessionManager
 import data.SessionStore
+import data.StockLotApi
 import data.StockReceivingBrowseApi
 import data.StockReceivingItem
 import data.SupabaseConfig
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
@@ -106,6 +111,12 @@ private val ColorTextSec = Color(0xFF64748B)
 private val ColorBg = Color(0xFFF8FAFC)
 
 
+private sealed class RfidScreenMode {
+    object PickMode : RfidScreenMode()
+    object PickLot : RfidScreenMode()
+    data class Tagging(val lotId: Long?, val lotCode: String?) : RfidScreenMode()
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CheckRfidScreen(onBack: () -> Unit) {
@@ -120,6 +131,11 @@ fun CheckRfidScreen(onBack: () -> Unit) {
     val currentUserName = remember { SessionStore.getDisplayName(ctx) }
 
     val db = remember { DraftDatabase(ctx) }
+
+    var screenMode by remember { mutableStateOf<RfidScreenMode>(RfidScreenMode.PickMode) }
+    var lotPickLoading by remember { mutableStateOf(false) }
+    var availableLots by remember { mutableStateOf<List<LotSummary>>(emptyList()) }
+    var lotPickError by remember { mutableStateOf<String?>(null) }
 
     var loading by remember { mutableStateOf(false) }
     var savingAll by remember { mutableStateOf(false) }
@@ -139,11 +155,12 @@ fun CheckRfidScreen(onBack: () -> Unit) {
             loading = true
             msg = null
             try {
-                val token = AuthManager.getValidAccessToken(ctx)
-                if (token.isNullOrBlank()) throw Exception("กรุณาล็อกอินใหม่")
-                items = StockReceivingBrowseApi.fetchAll(token)
+                val currentLotId = (screenMode as? RfidScreenMode.Tagging)?.lotId
+                items = AuthManager.withValidToken(ctx) { token ->
+                    StockReceivingBrowseApi.fetchAll(token, currentLotId)
+                }
             } catch (e: Exception) {
-                msg = e.message ?: "โหลดข้อมูลไม่สำเร็จ"
+                msg = AppError.resolve(e)
             } finally {
                 loading = false
             }
@@ -178,13 +195,15 @@ fun CheckRfidScreen(onBack: () -> Unit) {
     }
 
     LaunchedEffect(Unit) {
-        // โหลด RFID draft ก่อน แล้วค่อย set flag
         val savedDraft = withContext(Dispatchers.IO) { db.loadRfidDraft(currentBranchId) }
         if (savedDraft.isNotEmpty()) draftTags.putAll(savedDraft)
-        rfidDraftLoaded = true  // สัญญาณให้ auto-save เริ่มได้
-
-        load()
+        rfidDraftLoaded = true
         permissionLauncher.launch(arrayOf(Manifest.permission.READ_PHONE_STATE, Manifest.permission.WRITE_EXTERNAL_STORAGE, Manifest.permission.READ_EXTERNAL_STORAGE))
+    }
+
+    // โหลดสินค้าเมื่อเข้าโหมด Tagging
+    LaunchedEffect(screenMode) {
+        if (screenMode is RfidScreenMode.Tagging) load()
     }
 
     // Auto-save RFID draft — เริ่มหลัง rfidDraftLoaded=true เท่านั้น
@@ -304,33 +323,40 @@ fun CheckRfidScreen(onBack: () -> Unit) {
         }
     }
 
-    // Hardware Scan Loop (เฉพาะเครื่องที่ต้อง Polling อย่าง P8)
+    // Hardware Scan Loop
     LaunchedEffect(scanningOn) {
-        if (!isReaderConnected || !scanningOn) {
-            if (currentDeviceType == DeviceType.HC && !scanningOn) hcReader?.stopInventory()
-            return@LaunchedEffect
-        }
+        if (!isReaderConnected || !scanningOn) return@LaunchedEffect
 
         try {
             if (currentDeviceType == DeviceType.HC) {
+                // HC: start → คอยอยู่ใน loop → stop ใน finally (start/stop อยู่ใน coroutine เดียวกัน)
                 hcReader?.startInventory()
+                try {
+                    while (isActive && scanningOn) delay(100)
+                } finally {
+                    hcReader?.stopInventory()
+                }
             } else if (currentDeviceType == DeviceType.P8_MAGICRF) {
-                while (scanningOn) {
-                    withContext(Dispatchers.IO) {
-                        val epcList = p8Reader?.inventoryRealTime()
-                        if (epcList != null && epcList.isNotEmpty()) {
-                            for (epc in epcList) {
-                                if (epc != null) {
-                                    val epcStr = Tools.Bytes2HexString(epc, epc.size)
-                                    scanCh.trySend(normalizeToken(epcStr))
-                                }
-                            }
+                // P8: delay อยู่นอก withContext เพื่อให้ cancel ได้ทันที
+                while (isActive && scanningOn) {
+                    val epcList = try {
+                        withContext(Dispatchers.IO) { p8Reader?.inventoryRealTime() }
+                    } catch (_: Exception) { null }
+
+                    if (!isActive || !scanningOn) break
+
+                    epcList?.forEach { epc ->
+                        if (epc != null) {
+                            val epcStr = Tools.Bytes2HexString(epc, epc.size)
+                            scanCh.trySend(normalizeToken(epcStr))
                         }
-                        delay(80)
                     }
+                    delay(80)  // cancellation point นอก IO — cancel ได้ทันที
                 }
             }
-        } catch (e: Exception) { scanningOn = false }
+        } catch (_: Exception) {
+            withContext(Dispatchers.Main) { scanningOn = false }
+        }
     }
 
     // รับข้อมูลจาก Channel แล้วส่งให้ Callback ของ Dialog
@@ -372,11 +398,13 @@ fun CheckRfidScreen(onBack: () -> Unit) {
         }
     }
 
-    // focus ครั้งแรกตอนเปิดหน้า
-    LaunchedEffect(searchFocusRequester) {
-        delay(600)
-        try { searchFocusRequester.requestFocus() } catch (_: Exception) {}
-        keyboardController?.hide()
+    // focus เมื่อเข้า Tagging mode (BarcodeSearchBar ถูก compose แล้วตอนนี้)
+    LaunchedEffect(screenMode) {
+        if (screenMode is RfidScreenMode.Tagging) {
+            delay(400)
+            try { searchFocusRequester.requestFocus() } catch (_: Exception) {}
+            keyboardController?.hide()
+        }
     }
 
     // คืน focus ให้ main screen ทันทีที่ปิด dialog
@@ -396,28 +424,88 @@ fun CheckRfidScreen(onBack: () -> Unit) {
             try {
                 val token = AuthManager.getValidAccessToken(ctx)
                 if (token.isNullOrBlank()) throw Exception("กรุณาล็อกอินใหม่")
+
+                val originalLotId = (screenMode as? RfidScreenMode.Tagging)?.lotId
+
+                // ถ้าเป็นโหมดไม่มีลอต → สร้าง auto lot ก่อนบันทึก
+                val effectiveLotId: Long? = if (originalLotId == null) {
+                    val autoLotId = StockLotApi.createAutoLot(
+                        branchId  = currentBranchId,
+                        userId    = currentUserId,
+                        userName  = currentUserName,
+                        token     = token
+                    )
+                    // สร้าง lot items (productId → จำนวน tag ที่ยิง)
+                    val lotItemsMap = needList
+                        .associate { it.productId to (draftTags[it.productId]?.size ?: 0) }
+                        .filter { it.value > 0 }
+                    StockLotApi.createLotItems(autoLotId, lotItemsMap, token)
+                    autoLotId
+                } else originalLotId
+
                 val payload = needList.associate { it.productId to (draftTags[it.productId] ?: emptyList()) }
-                SupabaseBatchCommit.commitAll(payload, token, currentBranchId, currentBranchName, currentUserId, currentUserName)
-                SupabaseBatchCommit.clearStockReceiving(token, currentBranchId)
+                SupabaseBatchCommit.commitAll(payload, token, currentBranchId, currentBranchName, currentUserId, currentUserName, effectiveLotId)
+
+                // clearStockReceiving ใช้ originalLotId (null = ลบแถวที่ไม่มีลอต)
+                SupabaseBatchCommit.clearStockReceiving(token, currentBranchId, originalLotId)
+
+                // อัปเดต status เฉพาะลอตที่เลือกมาจาก picker (auto lot สร้างเป็น SUCCESS ตั้งแต่แรก)
+                if (originalLotId != null) {
+                    StockLotApi.updateLotStatus(originalLotId, "SUCCESS", token)
+                }
+
                 draftTags.clear()
-                // ล้าง RFID draft เพราะบันทึกเข้าระบบแล้ว
                 withContext(Dispatchers.IO) { db.clearRfidDraft(currentBranchId) }
                 load()
                 msg = "บันทึกข้อมูลลงสาขา $currentBranchId เรียบร้อยแล้ว"
             } catch (e: Exception) {
-                msg = e.message ?: "บันทึกไม่สำเร็จ"
+                msg = AppError.resolve(e)
             } finally {
                 savingAll = false
             }
         }
     }
 
+    when (screenMode) {
+        RfidScreenMode.PickMode -> RfidModePickerScreen(
+            onBack = onBack,
+            onSelectNoLot = { screenMode = RfidScreenMode.Tagging(null, null) },
+            onSelectLot = {
+                screenMode = RfidScreenMode.PickLot
+                lotPickLoading = true
+                lotPickError = null
+                scope.launch {
+                    try {
+                        availableLots = AuthManager.withValidToken(ctx) { token ->
+                            StockLotApi.fetchActiveLots(currentBranchId, token, listOf("COMPLETED"))
+                        }
+                    } catch (e: Exception) {
+                        lotPickError = AppError.resolve(e)
+                    } finally {
+                        lotPickLoading = false
+                    }
+                }
+            }
+        )
+        RfidScreenMode.PickLot -> RfidLotPickerScreen(
+            onBack = { screenMode = RfidScreenMode.PickMode },
+            loading = lotPickLoading,
+            error = lotPickError,
+            lots = availableLots,
+            onSelectLot = { lot -> screenMode = RfidScreenMode.Tagging(lot.id, lot.lotCode) }
+        )
+        is RfidScreenMode.Tagging -> {
+
     Scaffold(
         containerColor = ColorBg,
         topBar = {
             ModernTopBar(
                 title = "RFID Tagging",
-                subtitle = "สาขา: $currentBranchName",
+                subtitle = run {
+                    val t = screenMode as? RfidScreenMode.Tagging
+                    if (t?.lotId != null) "ลอต: ${t.lotCode} | สาขา: $currentBranchName"
+                    else "ไม่มีลอต | สาขา: $currentBranchName"
+                },
                 onBack = onBack,
                 onRefresh = { load() },
                 loading = loading || savingAll,
@@ -529,7 +617,7 @@ fun CheckRfidScreen(onBack: () -> Unit) {
                                     }
                                     msg = "ลบสินค้าออกจากรายการรับเข้าแล้ว"
                                 } catch (e: Exception) {
-                                    msg = "ลบไม่สำเร็จ: ${e.message}"
+                                    msg = AppError.resolve(e)
                                 }
                             }
                         }
@@ -592,6 +680,152 @@ fun CheckRfidScreen(onBack: () -> Unit) {
                 }
             }
         )
+    }
+        } // end is Tagging
+    } // end when(screenMode)
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RfidModePickerScreen(
+    onBack: () -> Unit,
+    onSelectNoLot: () -> Unit,
+    onSelectLot: () -> Unit
+) {
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("เช็ค RFID", fontWeight = FontWeight.Bold) },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.Outlined.ArrowBackIosNew, null, modifier = Modifier.size(20.dp))
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = ColorBg)
+            )
+        },
+        containerColor = ColorBg
+    ) { pad ->
+        Column(
+            modifier = Modifier.fillMaxSize().padding(pad).padding(24.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text("เลือกโหมดการติก RFID", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = ColorTextMain)
+            Spacer(Modifier.height(8.dp))
+            Text("จะติก tag แบบไหน?", style = MaterialTheme.typography.bodyMedium, color = ColorTextSec)
+            Spacer(Modifier.height(40.dp))
+
+            // ปุ่มแบบมีลอต
+            Card(
+                onClick = onSelectLot,
+                modifier = Modifier.fillMaxWidth().height(110.dp),
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFFE8F5E9)),
+                elevation = CardDefaults.cardElevation(0.dp)
+            ) {
+                Row(Modifier.fillMaxSize().padding(horizontal = 24.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+                    Surface(shape = RoundedCornerShape(14.dp), color = Color(0xFF4CAF50).copy(0.2f), modifier = Modifier.size(56.dp)) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(Icons.Outlined.Inventory2, null, tint = Color(0xFF2E7D32), modifier = Modifier.size(30.dp))
+                        }
+                    }
+                    Column {
+                        Text("ติก RFID แบบมีลอต", fontWeight = FontWeight.Bold, fontSize = 17.sp, color = Color(0xFF2E7D32))
+                        Text("เลือกลอตที่ต้องการติก tag", style = MaterialTheme.typography.bodySmall, color = Color(0xFF388E3C))
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            // ปุ่มแบบไม่มีลอต
+            Card(
+                onClick = onSelectNoLot,
+                modifier = Modifier.fillMaxWidth().height(110.dp),
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF3E0)),
+                elevation = CardDefaults.cardElevation(0.dp)
+            ) {
+                Row(Modifier.fillMaxSize().padding(horizontal = 24.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+                    Surface(shape = RoundedCornerShape(14.dp), color = Color(0xFFFF9800).copy(0.2f), modifier = Modifier.size(56.dp)) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(Icons.Outlined.QrCodeScanner, null, tint = Color(0xFFE65100), modifier = Modifier.size(30.dp))
+                        }
+                    }
+                    Column {
+                        Text("ติก RFID ไม่มีลอต", fontWeight = FontWeight.Bold, fontSize = 17.sp, color = Color(0xFFE65100))
+                        Text("สินค้าที่ไม่ได้อยู่ในลอต", style = MaterialTheme.typography.bodySmall, color = Color(0xFFF57C00))
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RfidLotPickerScreen(
+    onBack: () -> Unit,
+    loading: Boolean,
+    error: String?,
+    lots: List<LotSummary>,
+    onSelectLot: (LotSummary) -> Unit
+) {
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("เลือกลอต", fontWeight = FontWeight.Bold) },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.Outlined.ArrowBackIosNew, null, modifier = Modifier.size(20.dp))
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = ColorBg)
+            )
+        },
+        containerColor = ColorBg
+    ) { pad ->
+        Box(Modifier.fillMaxSize().padding(pad)) {
+            when {
+                loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = ColorPrimary) }
+                error != null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text(error, color = MaterialTheme.colorScheme.error) }
+                lots.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("ไม่มีลอตที่รอดำเนินการ", color = ColorTextSec) }
+                else -> LazyColumn(
+                    contentPadding = PaddingValues(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(lots) { lot ->
+                        Card(
+                            onClick = { onSelectLot(lot) },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(14.dp),
+                            colors = CardDefaults.cardColors(containerColor = Color.White),
+                            elevation = CardDefaults.cardElevation(2.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Surface(shape = RoundedCornerShape(10.dp), color = ColorPrimarySoft, modifier = Modifier.size(44.dp)) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Icon(Icons.Outlined.Inventory2, null, tint = ColorPrimary, modifier = Modifier.size(24.dp))
+                                    }
+                                }
+                                Column(Modifier.weight(1f)) {
+                                    Text(lot.lotCode, fontWeight = FontWeight.Bold, color = ColorTextMain)
+                                    Text("${lot.itemCount} รายการ | รับแล้ว ${lot.receivedTotal}/${lot.expectedTotal}", style = MaterialTheme.typography.bodySmall, color = ColorTextSec)
+                                }
+                                Surface(shape = RoundedCornerShape(8.dp), color = if (lot.status == "PARTIAL") ColorWarningSoft else ColorSuccessSoft) {
+                                    Text(lot.status, modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = if (lot.status == "PARTIAL") ColorWarning else ColorSuccess)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1087,12 +1321,9 @@ fun ModernRfidDialog(
         }
     }
 
-    // ผูก Callback เพื่อให้ Hardware ที่ยิงได้ วิ่งเข้าฟังก์ชัน submitCode
-    // key = isScanning เพื่อให้ re-register callback ทุกครั้งที่ toggle scan
+    // ผูก callback เมื่อ isScanning = true (re-register ทุกครั้งที่ toggle)
     DisposableEffect(isScanning) {
-        if (isScanning) {
-            setScanCallback { tag -> submitCode(tag) }
-        }
+        if (isScanning) setScanCallback { tag -> submitCode(tag) }
         onDispose { setScanCallback(null) }
     }
 
@@ -1384,12 +1615,12 @@ private object SupabaseBatchCommit {
         }
     }
 
-    suspend fun commitAll(data: Map<Long, List<String>>, accessToken: String?, branchId: Long, branchName: String, userId: String, userName: String) {
+    suspend fun commitAll(data: Map<Long, List<String>>, accessToken: String?, branchId: Long, branchName: String, userId: String, userName: String, lotId: Long? = null) {
         for ((pid, rfids) in data) {
             if (rfids.isEmpty()) continue
             insertTags(pid, rfids, accessToken, branchId)
             addStock(pid, rfids.size.toDouble(), accessToken, branchId)
-            insertMovement(productId = pid, qty = rfids.size.toDouble(), accessToken = accessToken, branchId = branchId, branchName = branchName, userId = userId, userName = userName)
+            insertMovement(productId = pid, qty = rfids.size.toDouble(), accessToken = accessToken, branchId = branchId, branchName = branchName, userId = userId, userName = userName, lotId = lotId)
         }
     }
 
@@ -1468,16 +1699,27 @@ private object SupabaseBatchCommit {
         throw IllegalStateException("อัปเดต stock ไม่สำเร็จ หลังลอง 3 ครั้ง (concurrent conflict)")
     }
 
-    private suspend fun insertMovement(productId: Long, qty: Double, accessToken: String?, branchId: Long, branchName: String, userId: String, userName: String) {
-        val body = JSONObject().put("product_id", productId.toString()).put("product_id_bigint", productId).put("type", "IN").put("qty", qty).put("branch_id", branchId).put("note", "รับสินค้าเข้าสาขา $branchId ($branchName) [RFID]").put("created_by", userId).put("created_by_name", userName)
+    private suspend fun insertMovement(productId: Long, qty: Double, accessToken: String?, branchId: Long, branchName: String, userId: String, userName: String, lotId: Long? = null) {
+        val body = JSONObject()
+            .put("product_id", productId.toString())
+            .put("product_id_bigint", productId)
+            .put("type", "IN")
+            .put("qty", qty)
+            .put("branch_id", branchId)
+            .put("note", "รับสินค้าเข้าสาขา $branchId ($branchName) [RFID]")
+            .put("created_by", userId)
+            .put("created_by_name", userName)
+        if (lotId != null) body.put("lot_id", lotId) else body.put("lot_id", JSONObject.NULL)
         val req = Request.Builder().url("${SupabaseConfig.URL}/rest/v1/stock_movements").post(body.toString().toRequestBody(jsonMedia)).addHeader("apikey", SupabaseConfig.ANON_KEY).addHeader("Authorization", "Bearer ${bearer(accessToken)}").addHeader("Content-Type", "application/json").addHeader("Prefer", "return=minimal").build()
         val (code, raw) = http(req)
         if (code !in 200..299) throw IllegalStateException("บันทึก movement ไม่สำเร็จ ($code) $raw")
     }
 
-    suspend fun clearStockReceiving(accessToken: String?, branchId: Long? = null) {
+    suspend fun clearStockReceiving(accessToken: String?, branchId: Long? = null, lotId: Long? = null) {
         var url = "${SupabaseConfig.URL}/rest/v1/stock_receiving?product_id=gt.0"
         if (branchId != null) url += "&branch_id=eq.$branchId"
+        // ลบเฉพาะ lot นั้น หรือเฉพาะไม่มี lot_id
+        url += if (lotId != null) "&lot_id=eq.$lotId" else "&lot_id=is.null"
         val req = Request.Builder().url(url).delete().addHeader("apikey", SupabaseConfig.ANON_KEY).addHeader("Authorization", "Bearer ${bearer(accessToken)}").addHeader("Prefer", "return=minimal").build()
         val (code, raw) = http(req)
         if (code !in 200..299) throw IllegalStateException("ล้าง stock_receiving ไม่สำเร็จ ($code) $raw")

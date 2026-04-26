@@ -15,7 +15,18 @@ data class ReceiveDraftRow(
     val imageUrl: String?
 )
 
-class DraftDatabase(ctx: Context) : SQLiteOpenHelper(ctx, "drafts.db", null, 2) {
+data class LotReceiveDraftRow(
+    val productId: Long,
+    val lotId: Long,
+    val lotItemId: Long,
+    val code: String,
+    val name: String,
+    val imageUrl: String?,
+    val qty: Int,
+    val expectedQty: Int
+)
+
+class DraftDatabase(ctx: Context) : SQLiteOpenHelper(ctx, "drafts.db", null, 3) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -50,19 +61,35 @@ class DraftDatabase(ctx: Context) : SQLiteOpenHelper(ctx, "drafts.db", null, 2) 
             )
             """.trimIndent()
         )
+        db.execSQL(CREATE_LOT_DRAFT)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) {
-            // เพิ่มตาราง stock_count_draft โดยไม่ทำลายข้อมูลเดิม
             db.execSQL(
-                """
-                CREATE TABLE IF NOT EXISTS stock_count_draft (
-                    rfid TEXT PRIMARY KEY
-                )
-                """.trimIndent()
+                "CREATE TABLE IF NOT EXISTS stock_count_draft (rfid TEXT PRIMARY KEY)"
             )
         }
+        if (oldVersion < 3) {
+            db.execSQL(CREATE_LOT_DRAFT)
+        }
+    }
+
+    companion object {
+        private const val CREATE_LOT_DRAFT = """
+            CREATE TABLE IF NOT EXISTS lot_receive_draft (
+                product_id   INTEGER NOT NULL,
+                branch_id    INTEGER NOT NULL,
+                lot_id       INTEGER NOT NULL,
+                lot_item_id  INTEGER NOT NULL,
+                code         TEXT NOT NULL DEFAULT '',
+                name         TEXT NOT NULL DEFAULT '',
+                image_url    TEXT,
+                qty          INTEGER DEFAULT 0,
+                expected_qty INTEGER DEFAULT 0,
+                PRIMARY KEY (product_id, branch_id, lot_id)
+            )
+        """
     }
 
     // ── Receive Draft ────────────────────────────────────────────────────────
@@ -190,5 +217,98 @@ class DraftDatabase(ctx: Context) : SQLiteOpenHelper(ctx, "drafts.db", null, 2) 
 
     fun clearStockCountDraft() {
         writableDatabase.delete("stock_count_draft", null, null)
+    }
+
+    // ── Lot Receive Draft ────────────────────────────────────────────────────
+
+    // replace ทั้งหมดของ lot นั้น (ใช้กับ snapshotFlow auto-save)
+    fun setLotReceiveDraft(rows: List<LotReceiveDraftRow>, branchId: Long, lotId: Long) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.delete("lot_receive_draft", "branch_id=? AND lot_id=?",
+                arrayOf(branchId.toString(), lotId.toString()))
+            for (r in rows) {
+                db.insert("lot_receive_draft", null, ContentValues().apply {
+                    put("product_id",   r.productId)
+                    put("branch_id",    branchId)
+                    put("lot_id",       r.lotId)
+                    put("lot_item_id",  r.lotItemId)
+                    put("code",         r.code)
+                    put("name",         r.name)
+                    put("image_url",    r.imageUrl)
+                    put("qty",          r.qty)
+                    put("expected_qty", r.expectedQty)
+                })
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    // cumulative add ชิ้นเดียว (ยังคงไว้เผื่อใช้)
+    fun saveLotReceiveItem(row: LotReceiveDraftRow, branchId: Long) {
+        val db = writableDatabase
+        val existing = db.rawQuery(
+            "SELECT qty FROM lot_receive_draft WHERE product_id=? AND branch_id=? AND lot_id=?",
+            arrayOf(row.productId.toString(), branchId.toString(), row.lotId.toString())
+        ).use { cur -> if (cur.moveToFirst()) cur.getInt(0) else -1 }
+
+        if (existing >= 0) {
+            db.execSQL(
+                "UPDATE lot_receive_draft SET qty = qty + ? WHERE product_id=? AND branch_id=? AND lot_id=?",
+                arrayOf(row.qty, row.productId, branchId, row.lotId)
+            )
+        } else {
+            db.insert("lot_receive_draft", null, ContentValues().apply {
+                put("product_id",   row.productId)
+                put("branch_id",    branchId)
+                put("lot_id",       row.lotId)
+                put("lot_item_id",  row.lotItemId)
+                put("code",         row.code)
+                put("name",         row.name)
+                put("image_url",    row.imageUrl)
+                put("qty",          row.qty)
+                put("expected_qty", row.expectedQty)
+            })
+        }
+    }
+
+    fun getLotReceivedQty(productId: Long, branchId: Long, lotId: Long): Int {
+        return readableDatabase.rawQuery(
+            "SELECT qty FROM lot_receive_draft WHERE product_id=? AND branch_id=? AND lot_id=?",
+            arrayOf(productId.toString(), branchId.toString(), lotId.toString())
+        ).use { cur -> if (cur.moveToFirst()) cur.getInt(0) else 0 }
+    }
+
+    fun loadLotReceiveDraft(branchId: Long, lotId: Long): List<LotReceiveDraftRow> {
+        return readableDatabase.rawQuery(
+            "SELECT * FROM lot_receive_draft WHERE branch_id=? AND lot_id=? ORDER BY rowid ASC",
+            arrayOf(branchId.toString(), lotId.toString())
+        ).use { cur ->
+            val list = mutableListOf<LotReceiveDraftRow>()
+            while (cur.moveToNext()) {
+                list.add(LotReceiveDraftRow(
+                    productId   = cur.getLong(cur.getColumnIndexOrThrow("product_id")),
+                    lotId       = cur.getLong(cur.getColumnIndexOrThrow("lot_id")),
+                    lotItemId   = cur.getLong(cur.getColumnIndexOrThrow("lot_item_id")),
+                    code        = cur.getString(cur.getColumnIndexOrThrow("code")) ?: "",
+                    name        = cur.getString(cur.getColumnIndexOrThrow("name")) ?: "",
+                    imageUrl    = cur.getString(cur.getColumnIndexOrThrow("image_url")),
+                    qty         = cur.getInt(cur.getColumnIndexOrThrow("qty")),
+                    expectedQty = cur.getInt(cur.getColumnIndexOrThrow("expected_qty"))
+                ))
+            }
+            list
+        }
+    }
+
+    fun clearLotReceiveDraft(branchId: Long, lotId: Long) {
+        writableDatabase.delete(
+            "lot_receive_draft",
+            "branch_id=? AND lot_id=?",
+            arrayOf(branchId.toString(), lotId.toString())
+        )
     }
 }

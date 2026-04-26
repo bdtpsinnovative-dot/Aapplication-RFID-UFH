@@ -54,12 +54,14 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
 
+import data.AppError
 import data.AuthManager
 import data.DraftDatabase
 import data.ProductDatabase
 import data.ProductLite
 import data.ReceiveDraftRow
 import data.SessionStore
+import data.StockLotApi
 import data.StockReceivingApi
 import data.StockUpdateDto
 import data.SupabaseProductsApi
@@ -91,12 +93,20 @@ data class ReceiveRow(
     val qty: Int,
     val stockBefore: Double,
     val stockAfter: Double? = null,
-    val imageUrl: String? = null
+    val imageUrl: String? = null,
+    val lotItemId: Long? = null,
+    val expectedQty: Int? = null,
+    val lotCode: String? = null
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ReceiveScreen(onBack: () -> Unit) {
+fun ReceiveScreen(
+    onBack: () -> Unit,
+    lotId: Long? = null,
+    lotCode: String? = null,
+    onLotDone: (() -> Unit)? = null
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -121,6 +131,11 @@ fun ReceiveScreen(onBack: () -> Unit) {
     var scannedCodeForDialog by remember { mutableStateOf("") }
     var showQuantityDialog by remember { mutableStateOf(false) }
 
+    // Lot mode: map productId → LotItemDetail (โหลดครั้งเดียวตอนเปิดหน้า)
+    var lotItemMap by remember { mutableStateOf<Map<Long, data.LotItemDetail>>(emptyMap()) }
+    var lotDialogExpected by remember { mutableStateOf<Int?>(null) }
+    var lotDialogReceived by remember { mutableStateOf<Int?>(null) }
+
     fun upsertRow(p: ProductLite, codeUsed: String, inc: Int, stockBefore: Double) {
         val idx = rows.indexOfFirst { it.productId == p.id }
         val imgUrl = p.image_url
@@ -136,7 +151,20 @@ fun ReceiveScreen(onBack: () -> Unit) {
                 }
             }
         } else {
-            rows.add(ReceiveRow(p.id, codeUsed, p.name, p.price, inc, stockBefore, null, imgUrl))
+            // Lot mode: ดึง lotItemId / expectedQty จาก lotItemMap
+            val lotItem = if (lotId != null) lotItemMap[p.id] else null
+            rows.add(ReceiveRow(
+                productId   = p.id,
+                code        = codeUsed,
+                name        = p.name,
+                price       = p.price,
+                qty         = inc,
+                stockBefore = stockBefore,
+                imageUrl    = imgUrl,
+                lotItemId   = lotItem?.id,
+                expectedQty = lotItem?.expectedQty,
+                lotCode     = if (lotItem != null) lotCode else null
+            ))
         }
     }
 
@@ -176,10 +204,17 @@ fun ReceiveScreen(onBack: () -> Unit) {
 
                 scannedCodeForDialog = c
                 productForDialog = p
+
+                // Lot mode: ดึง expected จาก lotItemMap, received จาก rows ที่มีอยู่
+                if (lotId != null) {
+                    val lotItem = lotItemMap[p.id]
+                    lotDialogExpected = lotItem?.expectedQty
+                    lotDialogReceived = rows.firstOrNull { it.productId == p.id }?.qty ?: 0
+                }
                 showQuantityDialog = true
 
             } catch (e: Exception) {
-                if (e.message?.contains("401") == true) msg = "Session หมดอายุ" else msg = e.message
+                msg = AppError.resolve(e)
                 isError = true
             }
         }
@@ -208,25 +243,28 @@ fun ReceiveScreen(onBack: () -> Unit) {
                 showQuantityDialog = false
                 productForDialog = null
 
-                // save ทันทีไม่รอ snapshotFlow — ป้องกันกดออกก่อน coroutine ทำงาน
-                val pending = rows.filter { it.stockAfter == null }
-                withContext(Dispatchers.IO) {
-                    db.saveReceiveDraft(
-                        pending.map { ReceiveDraftRow(it.productId, it.code, it.name, it.price, it.qty, it.stockBefore, it.imageUrl) },
-                        branchId
-                    )
+                if (lotId == null) {
+                    // No-lot mode: save draft ทันที (ป้องกันกดออกก่อน snapshotFlow ทำงาน)
+                    val pending = rows.filter { it.stockAfter == null }
+                    withContext(Dispatchers.IO) {
+                        db.saveReceiveDraft(
+                            pending.map { ReceiveDraftRow(it.productId, it.code, it.name, it.price, it.qty, it.stockBefore, it.imageUrl) },
+                            branchId
+                        )
+                    }
                 }
+                // Lot mode: snapshotFlow จัดการ auto-save ให้อัตโนมัติเมื่อ rows เปลี่ยน
 
                 focusRequester.requestFocus()
                 keyboardController?.hide()
             } catch (e: Exception) {
-                msg = e.message; isError = true
+                msg = AppError.resolve(e); isError = true
             }
         }
     }
 
     fun saveReceiving() {
-        val pending = rows.filter { it.stockAfter == null }
+        val pending = rows.filter { it.stockAfter == null && it.qty > 0 }
         if (pending.isEmpty()) { msg = "ไม่มีรายการใหม่"; isError = true; return }
         scope.launch {
             saving = true; msg = null; isError = false
@@ -234,18 +272,12 @@ fun ReceiveScreen(onBack: () -> Unit) {
                 val token = AuthManager.getValidAccessToken(context)
                 if (token.isNullOrBlank()) throw Exception("กรุณาล็อกอินใหม่")
 
-                // 💡 ตรงนี้คือการยิงขึ้น Server ทีเดียว ซึ่งถูกต้องแล้วจ้ะ
                 val ids = pending.map { it.productId }.distinct()
-                val currentMap = StockReceivingApi.fetchQtyMap(ids, branchId, token)
+                val currentMap = StockReceivingApi.fetchQtyMap(ids, branchId, token, lotId)
                 val updates = pending.map {
-                    StockUpdateDto(
-                        branchId,
-                        it.productId,
-                        (currentMap[it.productId] ?: 0.0) + it.qty
-                    )
+                    StockUpdateDto(branchId, it.productId, (currentMap[it.productId] ?: 0.0) + it.qty)
                 }
 
-                // ลอง upsert — ถ้า server แจ้ง JWT expired ให้ force refresh แล้ว retry 1 ครั้ง
                 try {
                     StockReceivingApi.upsertStockList(updates, token)
                 } catch (e: Exception) {
@@ -261,44 +293,118 @@ fun ReceiveScreen(onBack: () -> Unit) {
                 }
                 for (i in rows.indices) {
                     val r = rows[i]
-                    if (r.stockAfter == null) rows[i] = r.copy(stockAfter = (currentMap[r.productId] ?: 0.0) + r.qty)
+                    if (r.stockAfter == null && r.qty > 0)
+                        rows[i] = r.copy(stockAfter = (currentMap[r.productId] ?: 0.0) + r.qty)
                 }
-                // ล้าง draft เพราะบันทึกสำเร็จแล้ว
-                withContext(Dispatchers.IO) { db.clearReceiveDraft(branchId) }
-                msg = "บันทึกสำเร็จ!"; isError = false
+
+                if (lotId != null) {
+                    // อัปเดต stock_lot_items received_qty
+                    val lotUpdates = rows.mapNotNull { r ->
+                        val id = r.lotItemId ?: return@mapNotNull null
+                        id to (r.stockBefore + r.qty).toInt()
+                    }
+                    if (lotUpdates.isNotEmpty()) StockLotApi.updateLotItemsReceived(lotUpdates, token)
+                    // คำนวณ status ลอต
+                    val allComplete = rows.filter { it.lotItemId != null }.all { r ->
+                        val received = (r.stockBefore + r.qty).toInt()
+                        r.expectedQty == null || received >= r.expectedQty
+                    }
+                    StockLotApi.updateLotStatus(lotId, if (allComplete) "COMPLETED" else "PARTIAL", token)
+                    msg = if (allComplete) "รับครบทุกรายการ!" else "บันทึกสำเร็จ (รับบางส่วน)"
+                    isError = false
+                    withContext(Dispatchers.IO) { kotlinx.coroutines.delay(1200) }
+                    onLotDone?.invoke()
+                } else {
+                    withContext(Dispatchers.IO) { db.clearReceiveDraft(branchId) }
+                    msg = "บันทึกสำเร็จ!"; isError = false
+                }
             } catch (e: Exception) {
-                msg = e.message; isError = true
+                msg = AppError.resolve(e); isError = true
             } finally { saving = false }
         }
     }
 
-    // โหลด draft ก่อน แล้วค่อย set flag ให้ auto-save เริ่มทำงาน
     LaunchedEffect(Unit) {
-        val draft = withContext(Dispatchers.IO) { db.loadReceiveDraft(branchId) }
-        if (draft.isNotEmpty()) {
-            rows.addAll(draft.map {
-                ReceiveRow(it.productId, it.code, it.name, it.price, it.qty, it.stockBefore, null, it.imageUrl)
+        if (lotId != null) {
+            // Lot mode: โหลด lotItemMap จาก API + rows จาก SQLite draft
+            try {
+                val token = AuthManager.getValidAccessToken(context)
+                if (!token.isNullOrBlank()) {
+                    val items = StockLotApi.fetchLotItems(lotId, token)
+                    lotItemMap = items.associateBy { it.productId }
+                }
+            } catch (e: Exception) {
+                msg = AppError.resolve(e); isError = true
+            }
+            // โหลดเฉพาะที่ยิงไว้แล้วจาก SQLite draft (กรอง qty=0 ออก)
+            val draft = withContext(Dispatchers.IO) {
+                db.loadLotReceiveDraft(branchId ?: 0L, lotId)
+            }
+            rows.addAll(draft.filter { it.qty > 0 }.map { r ->
+                ReceiveRow(
+                    productId   = r.productId,
+                    code        = r.code,
+                    name        = r.name,
+                    price       = 0.0,
+                    qty         = r.qty,
+                    stockBefore = 0.0,
+                    imageUrl    = r.imageUrl,
+                    // สำคัญ: ถ้าใน DB เป็น 0 ให้ถือว่าคือ null (นอกลอต)
+                    lotItemId   = if (r.lotItemId == 0L) null else r.lotItemId,
+                    expectedQty = if (r.lotItemId == 0L) null else r.expectedQty,
+                    lotCode     = lotCode
+                )
             })
+        } else {
+            // No-lot mode: โหลด draft
+            val draft = withContext(Dispatchers.IO) { db.loadReceiveDraft(branchId) }
+            if (draft.isNotEmpty()) {
+                rows.addAll(draft.map {
+                    ReceiveRow(it.productId, it.code, it.name, it.price, it.qty, it.stockBefore, null, it.imageUrl)
+                })
+            }
         }
-        draftLoaded = true  // สัญญาณให้ auto-save เริ่มได้
+        draftLoaded = true
         kotlinx.coroutines.delay(300)
         focusRequester.requestFocus()
         keyboardController?.hide()
     }
 
-    // Auto-save — เริ่มหลัง draftLoaded=true เท่านั้น ป้องกัน rows ว่างทับ draft
+    // Auto-save draft
     LaunchedEffect(draftLoaded) {
         if (!draftLoaded) return@LaunchedEffect
-        snapshotFlow { rows.toList() }
-            .collect { current ->
-                val pending = current.filter { it.stockAfter == null }
-                withContext(Dispatchers.IO) {
+        snapshotFlow { rows.toList() }.collect { current ->
+            withContext(Dispatchers.IO) {
+                if (lotId != null) {
+                    // Lot mode: save ทุก item ที่ยิงแล้ว (ทั้งในลอตและนอกลอต)
+                    // สินค้านอกลอต ใช้ lotItemId = 0 เป็น sentinel
+                    val scanned = current.filter { it.qty > 0 }
+                    db.setLotReceiveDraft(
+                        scanned.map { r ->
+                            data.LotReceiveDraftRow(
+                                productId   = r.productId,
+                                lotId       = lotId,
+                                lotItemId   = r.lotItemId ?: 0L,
+                                code        = r.code,
+                                name        = r.name,
+                                imageUrl    = r.imageUrl,
+                                qty         = r.qty,
+                                expectedQty = r.expectedQty ?: 0
+                            )
+                        },
+                        branchId ?: 0L,
+                        lotId
+                    )
+                } else {
+                    // No-lot mode: save ลง receive_draft เดิม
+                    val pending = current.filter { it.stockAfter == null }
                     db.saveReceiveDraft(
                         pending.map { ReceiveDraftRow(it.productId, it.code, it.name, it.price, it.qty, it.stockBefore, it.imageUrl) },
                         branchId
                     )
                 }
             }
+        }
     }
 
     Scaffold(
@@ -308,7 +414,10 @@ fun ReceiveScreen(onBack: () -> Unit) {
                 CenterAlignedTopAppBar(
                     title = {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text("รับสินค้าเข้า", fontWeight = FontWeight.Bold)
+                            Text(
+                                if (lotCode != null) "ลอต: $lotCode" else "รับสินค้าเข้า",
+                                fontWeight = FontWeight.Bold
+                            )
                             Text("Branch #$branchId", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
                         }
                     },
@@ -331,6 +440,7 @@ fun ReceiveScreen(onBack: () -> Unit) {
             BottomActionBar(
                 rows = rows,
                 saving = saving,
+                isLotMode = lotId != null,
                 onSave = { saveReceiving() }
             )
         }
@@ -366,7 +476,10 @@ fun ReceiveScreen(onBack: () -> Unit) {
                             moneyFmt = moneyFmt,
                             qtyFmt = qtyFmt,
                             saving = saving,
-                            onQtyChange = { newVal -> if (r.stockBefore + newVal >= 0) rows[idx] = r.copy(qty = newVal, stockAfter = null) },
+                            isLotItem = r.lotItemId != null,
+                            onQtyChange = { newVal ->
+                                if (newVal >= 1) rows[idx] = r.copy(qty = newVal, stockAfter = null)
+                            },
                             onDelete = { rows.removeAt(idx) }
                         )
                     }
@@ -378,7 +491,9 @@ fun ReceiveScreen(onBack: () -> Unit) {
         if (showQuantityDialog && productForDialog != null) {
             QuantityInputDialog(
                 productName = productForDialog!!.name,
-                imageUrl = productForDialog!!.image_url, // 💡 ส่งรูปเข้าไปตรงนี้ลูก
+                imageUrl = productForDialog!!.image_url,
+                lotExpectedQty = lotDialogExpected,
+                lotReceivedQty = lotDialogReceived,
                 onDismiss = {
                     showQuantityDialog = false
                     productForDialog = null
@@ -395,7 +510,9 @@ fun ReceiveScreen(onBack: () -> Unit) {
 @Composable
 fun QuantityInputDialog(
     productName: String,
-    imageUrl: String?, // 💡 ยายเพิ่มการรับ imageUrl เข้ามานะลูก
+    imageUrl: String?,
+    lotExpectedQty: Int? = null,
+    lotReceivedQty: Int? = null,
     onDismiss: () -> Unit,
     onConfirm: (Int) -> Unit
 ) {
@@ -434,6 +551,28 @@ fun QuantityInputDialog(
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
+
+                // แสดง ส่งมา / รับแล้ว ถ้าเป็น lot mode
+                if (lotExpectedQty != null) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    androidx.compose.foundation.layout.Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFFE3F2FD), RoundedCornerShape(10.dp))
+                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceEvenly
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("$lotExpectedQty", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = Color(0xFF1565C0))
+                            Text("ส่งมา", fontSize = 11.sp, color = Color.Gray)
+                        }
+                        Text("/", fontSize = 22.sp, color = Color.LightGray, modifier = Modifier.align(Alignment.CenterVertically))
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("${lotReceivedQty ?: 0}", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = Color(0xFF388E3C))
+                            Text("รับแล้ว", fontSize = 11.sp, color = Color.Gray)
+                        }
+                    }
+                }
 
                 Spacer(modifier = Modifier.height(24.dp))
 
@@ -579,7 +718,7 @@ fun StatusBanner(msg: String?, isError: Boolean, lastScanned: String?) {
 }
 
 @Composable
-fun BottomActionBar(rows: List<ReceiveRow>, saving: Boolean, onSave: () -> Unit) {
+fun BottomActionBar(rows: List<ReceiveRow>, saving: Boolean, onSave: () -> Unit, isLotMode: Boolean = false) {
     val pendingCount = rows.count { it.stockAfter == null }
     val totalQty = rows.filter { it.stockAfter == null }.sumOf { it.qty }
 
@@ -595,25 +734,31 @@ fun BottomActionBar(rows: List<ReceiveRow>, saving: Boolean, onSave: () -> Unit)
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Column(Modifier.weight(1f)) {
-                Text("รายการรอรับ", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                Text(
+                    if (isLotMode) "บันทึกลงเครื่องแล้ว ✓" else "รายการรอรับ",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (isLotMode) Color(0xFF388E3C) else Color.Gray
+                )
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("$totalQty", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                     Text("ชิ้น · $pendingCount รายการ", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                 }
             }
-            Button(
-                onClick = onSave,
-                enabled = pendingCount > 0 && !saving,
-                modifier = Modifier.height(46.dp),
-                shape = RoundedCornerShape(14.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-            ) {
-                if (saving) {
-                    CircularProgressIndicator(color = Color.White, modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                } else {
-                    Icon(Icons.Rounded.Save, null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("ยืนยัน", fontWeight = FontWeight.Bold)
+            if (!isLotMode) {
+                Button(
+                    onClick = onSave,
+                    enabled = pendingCount > 0 && !saving,
+                    modifier = Modifier.height(46.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                ) {
+                    if (saving) {
+                        CircularProgressIndicator(color = Color.White, modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                    } else {
+                        Icon(Icons.Rounded.Save, null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("ยืนยัน", fontWeight = FontWeight.Bold)
+                    }
                 }
             }
         }
@@ -627,10 +772,15 @@ fun ModernReceiveCard(
     qtyFmt: DecimalFormat,
     saving: Boolean,
     onQtyChange: (Int) -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    isLotItem: Boolean = false
 ) {
     val isSaved = row.stockAfter != null
-    val containerColor = if (isSaved) Color(0xFFF0FDF4) else MaterialTheme.colorScheme.surface
+    val containerColor = when {
+        isSaved               -> Color(0xFFF0FDF4)                      // บันทึกแล้ว → เขียวอ่อน
+        isLotItem && row.qty == 0 -> Color(0xFFFAFAFA)                  // lot item ยังไม่รับ → เทาอ่อน
+        else                  -> MaterialTheme.colorScheme.surface
+    }
     val borderColor = if (isSaved) Color(0xFFBBF7D0) else Color.Transparent
 
     ElevatedCard(
@@ -665,12 +815,70 @@ fun ModernReceiveCard(
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(row.code, style = MaterialTheme.typography.labelSmall, color = Color.Gray)
-                // คงเหลือเดิม อยู่บรรทัดเดียวกับ label
-                Text(
-                    "คงเหลือ: ${qtyFmt.format(row.stockBefore)}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color.Gray
-                )
+                if (row.lotCode != null) {
+                    // 1. เช็คว่าเป็นสินค้านอกลอตหรือไม่ (ถ้าโหลดจาก Draft อาจจะเป็น 0L เลยต้องเช็คด้วย)
+                    val isOutOfLot = row.lotItemId == null || row.lotItemId == 0L
+
+                    // 2. เช็คว่ารับเกินไหม (รับเข้ามา > ยอดที่คาดหวัง)
+                    val expected = row.expectedQty ?: 0
+                    val isOverQty = !isOutOfLot && row.qty > expected
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        modifier = Modifier.padding(top = 2.dp)
+                    ) {
+                        if (isOutOfLot) {
+                            // 🔴 แจ้งเตือน: สินค้านอกลอต (ป้ายสีเหลือง/ส้ม เหมือนหน้าตรวจสอบ)
+                            Surface(
+                                shape = RoundedCornerShape(4.dp),
+                                color = Color(0xFFFFF8E1) // สีเหลืองอ่อน
+                            ) {
+                                Text(
+                                    "นอกลอต",
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFFF57F17), // สีส้มเข้ม
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        } else if (isOverQty) {
+                            // 🔴 แจ้งเตือน: รับเกิน (ป้ายสีแดง บอกจำนวนที่เกิน)
+                            Surface(
+                                shape = RoundedCornerShape(4.dp),
+                                color = Color(0xFFFFEBEE) // สีแดงอ่อน
+                            ) {
+                                Text(
+                                    "รับเกิน (${row.qty}/$expected)",
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFFC62828), // สีแดงเข้ม
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        } else {
+                            // 🟢 ปกติ: สินค้าในลอต (ป้ายสีฟ้าเดิม พร้อมบอกยอด)
+                            Surface(
+                                shape = RoundedCornerShape(4.dp),
+                                color = Color(0xFFE3F2FD) // สีฟ้าอ่อน
+                            ) {
+                                Text(
+                                    "ลอต ${row.lotCode} (${row.qty}/$expected)",
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF1565C0) // สีฟ้าเข้ม
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    // โหมดรับเข้าปกติ (ไม่มีลอต)
+                    Text(
+                        "คงเหลือ: ${qtyFmt.format(row.stockBefore)}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.Gray
+                    )
+                }
             }
             Spacer(Modifier.width(8.dp))
             // ฝั่งขวา: qty control หรือ saved badge

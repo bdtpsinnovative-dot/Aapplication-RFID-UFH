@@ -60,11 +60,13 @@ object AuthManager {
                             }
                             newAccessToken // ส่งบัตรใบใหม่ไปให้ใช้
                         } else {
-                            null // ต่ออายุไม่ผ่าน (เช่น โดนแบน)
+                            SessionEventBus.emitExpired()
+                            null
                         }
                     }
                 } catch (e: Exception) {
                     e.printStackTrace()
+                    SessionEventBus.emitExpired()
                     null
                 }
             }
@@ -72,5 +74,29 @@ object AuthManager {
 
         // 4. ถ้ายังไม่หมดอายุ ก็ใช้ใบเดิมได้เลย
         return token
+    }
+
+    // Helper: เรียก API แล้ว retry อัตโนมัติเมื่อ server ตอบ 401 (JWT expired จริงๆ)
+    // ใช้แทนการเรียก getValidAccessToken เอง เพื่อกัน clock skew
+    suspend fun <T> withValidToken(ctx: Context, call: suspend (token: String) -> T): T {
+        val token = getValidAccessToken(ctx)
+            ?: throw IllegalStateException("ไม่มี session กรุณาล็อกอินใหม่")
+
+        return try {
+            call(token)
+        } catch (e: Exception) {
+            val is401 = e.message?.contains("401") == true
+                     || e.message?.contains("JWT") == true
+                     || e.message?.contains("PGRST303") == true
+            if (is401) {
+                // token หมดอายุจริงบน server → force refresh แล้ว retry 1 ครั้ง
+                val newToken = getValidAccessToken(ctx, forceRefresh = true)
+                    ?: run {
+                        SessionEventBus.emitExpired()
+                        throw IllegalStateException("Session หมดอายุ กรุณาล็อกอินใหม่")
+                    }
+                call(newToken)
+            } else throw e
+        }
     }
 }

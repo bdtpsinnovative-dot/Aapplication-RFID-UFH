@@ -60,6 +60,7 @@ import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
+import data.AppError
 import data.SessionManager
 import data.SupabaseConfig
 import kotlinx.coroutines.Dispatchers
@@ -136,7 +137,7 @@ fun Other1Screen(onBack: () -> Unit) {
                     stockQty = Api.fetchStockQty(p.id, token) ?: 0.0
                 }
             } catch (e: Exception) {
-                error = e.message ?: "เกิดข้อผิดพลาด"
+                error = AppError.resolve(e)
             } finally {
                 loading = false
             }

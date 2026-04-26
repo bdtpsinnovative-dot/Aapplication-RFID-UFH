@@ -37,6 +37,10 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import ui.Other1Screen
 import ui.Other2Screen
+import data.AppError
+import data.AuthManager
+import data.ProductSyncManager
+import data.SessionEventBus
 import data.SessionStore
 import data.SupabaseAuthApi
 import kotlinx.coroutines.launch
@@ -48,6 +52,9 @@ import ui.MoreInitialCountScreen
 import ui.MoreIssuesScreen
 import ui.MoreTransferScreen
 import ui.MoreUpdateSystemScreen
+import ui.LotCheckScreen
+import ui.LotMenuScreen
+import ui.LotSelectScreen
 import ui.ReceiveScreen
 import ui.StockCountScreen
 
@@ -63,6 +70,18 @@ data class MenuData(
 fun AppNav() {
     val nav = rememberNavController()
     val ctx = LocalContext.current
+    val navScope = rememberCoroutineScope()
+
+    // auto-logout เมื่อ token ใช้งานไม่ได้ (หมดอายุ + refresh ไม่ผ่าน)
+    LaunchedEffect(Unit) {
+        SessionEventBus.sessionExpired.collect {
+            SessionStore.clear(ctx)
+            nav.navigate(Routes.LOGIN) {
+                popUpTo(0) { inclusive = true }
+                launchSingleTop = true
+            }
+        }
+    }
 
     // ✅ กันกดกลับรัวๆ (ไม่ให้ pop ซ้อน)
     var backLocked by remember { mutableStateOf(false) }
@@ -147,6 +166,13 @@ fun AppNav() {
 
         composable(Routes.LOGIN) {
             LoginScreen(onSuccess = {
+                // sync product cache ทุกครั้งที่ login (ข้อมูลสินค้าใหม่เสมอ)
+                navScope.launch {
+                    try {
+                        val tok = AuthManager.getValidAccessToken(ctx)
+                        if (tok != null) ProductSyncManager.syncAll(ctx, tok)
+                    } catch (_: Exception) {}
+                }
                 nav.navigate(Routes.MENU) {
                     popUpTo(Routes.LOGIN) { inclusive = true }
                     launchSingleTop = true
@@ -168,6 +194,50 @@ fun AppNav() {
         }
 
         // ✅ ทุกหน้าที่มีปุ่มกลับ ให้ใช้ safeBack() แทน popBackStack()
+        composable(Routes.LOT_SELECT) {
+            LotSelectScreen(
+                onBack = { safeBack() },
+                onNoLot = { nav.navigate(Routes.RECEIVE) },
+                onSelectLot = { lotId, lotCode ->
+                    nav.navigate(Routes.lotMenu(lotId, lotCode))
+                }
+            )
+        }
+        composable(Routes.LOT_MENU) { back ->
+            val lotId   = back.arguments?.getString("lotId")?.toLongOrNull() ?: 0L
+            val lotCode = java.net.URLDecoder.decode(back.arguments?.getString("lotCode") ?: "", "UTF-8")
+            LotMenuScreen(
+                lotId     = lotId,
+                lotCode   = lotCode,
+                onBack    = { safeBack() },
+                onReceive = { nav.navigate(Routes.lotReceive(lotId, lotCode)) },
+                onCheck   = { nav.navigate(Routes.lotCheck(lotId, lotCode)) }
+            )
+        }
+        composable(Routes.LOT_RECEIVE) { back ->
+            val lotId   = back.arguments?.getString("lotId")?.toLongOrNull() ?: 0L
+            val lotCode = java.net.URLDecoder.decode(back.arguments?.getString("lotCode") ?: "", "UTF-8")
+            ReceiveScreen(
+                onBack  = { safeBack() },
+                lotId   = lotId,
+                lotCode = lotCode
+            )
+        }
+        composable(Routes.LOT_CHECK) { back ->
+            val lotId   = back.arguments?.getString("lotId")?.toLongOrNull() ?: 0L
+            val lotCode = java.net.URLDecoder.decode(back.arguments?.getString("lotCode") ?: "", "UTF-8")
+            LotCheckScreen(
+                lotId   = lotId,
+                lotCode = lotCode,
+                onBack  = { safeBack() },
+                onDone  = {
+                    nav.navigate(Routes.LOT_SELECT) {
+                        popUpTo(Routes.LOT_SELECT) { inclusive = true }
+                        launchSingleTop = true
+                    }
+                }
+            )
+        }
         composable(Routes.RECEIVE) { ReceiveScreen(onBack = { safeBack() }) }
         composable(Routes.CHECK_RFID) { CheckRfidScreen(onBack = { safeBack() }) }
         composable(Routes.STOCK_COUNT) { StockCountScreen(onBack = { safeBack() }) }
@@ -319,7 +389,7 @@ private fun LoginScreen(onSuccess: () -> Unit) {
                                         )
                                         onSuccess()
                                     } catch (ex: Exception) {
-                                        msg = ex.message ?: "เข้าสู่ระบบไม่สำเร็จ"
+                                        msg = AppError.resolve(ex)
                                     } finally {
                                         loading = false
                                     }
@@ -353,8 +423,17 @@ private fun SplashGate(
     val ctx = LocalContext.current
 
     LaunchedEffect(Unit) {
-        val token = SessionStore.getAccessToken(ctx)
-        if (token.isNullOrBlank()) onGoLogin() else onGoMenu()
+        val validToken = AuthManager.getValidAccessToken(ctx)
+        if (validToken.isNullOrBlank()) {
+            SessionStore.clear(ctx)
+            onGoLogin()
+        } else {
+            // sync product cache ถ้าว่างหรือเก่า (background — ไม่บล็อก UI)
+            if (ProductSyncManager.needsSync(ctx)) {
+                try { ProductSyncManager.syncAll(ctx, validToken) } catch (_: Exception) {}
+            }
+            onGoMenu()
+        }
     }
 
     Box(
@@ -384,7 +463,7 @@ private fun MenuScreen(
 
     // ✅ สร้างรายการเมนู (แก้ Unresolved reference 'menuItems')
     val menuItems = listOf(
-        MenuData("รับสินค้า", Icons.Outlined.Input, Routes.RECEIVE, Color(0xFF4CAF50)),
+        MenuData("รับสินค้า", Icons.Outlined.Input, Routes.LOT_SELECT, Color(0xFF4CAF50)),
         MenuData("เช็ค RFID", Icons.Outlined.QrCodeScanner, Routes.CHECK_RFID, Color(0xFF2196F3)),
         MenuData("นับสต็อก", Icons.Outlined.Inventory, Routes.STOCK_COUNT, Color(0xFFFF9800)),
         MenuData("เปรียบเทียบ", Icons.Outlined.CompareArrows, Routes.COMPARE, Color(0xFF9C27B0)),

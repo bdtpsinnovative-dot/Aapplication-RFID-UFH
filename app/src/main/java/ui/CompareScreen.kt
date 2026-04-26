@@ -25,6 +25,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
+import data.AppError
 import data.SessionManager
 import data.SupabaseConfig
 import kotlinx.coroutines.Dispatchers
@@ -169,7 +170,7 @@ fun CompareStockScreenV2(onBack: () -> Unit) {
                 setBanner(BannerState.NONE, null)
 
             } catch (e: Exception) {
-                setBanner(BannerState.ERROR, e.message ?: "โหลดข้อมูลไม่สำเร็จ")
+                setBanner(BannerState.ERROR, AppError.resolve(e))
             } finally {
                 loading = false
             }
@@ -218,7 +219,7 @@ fun CompareStockScreenV2(onBack: () -> Unit) {
                 load()
 
             } catch (e: Exception) {
-                setBanner(BannerState.ERROR, e.message ?: "ยืนยันไม่สำเร็จ")
+                setBanner(BannerState.ERROR, AppError.resolve(e))
             } finally {
                 confirming = false
             }

@@ -28,15 +28,23 @@ object StockReceivingBrowseApi {
             else -> 0.0
         }
 
-    private suspend fun fetchStockReceiving(accessToken: String?): List<Triple<Long, Double, String?>> =
+    private suspend fun fetchStockReceiving(accessToken: String?, lotId: Long?): List<Triple<Long, Double, String?>> =
         withContext(Dispatchers.IO) {
 
-            val url = "${SupabaseConfig.URL}/rest/v1/stock_receiving"
+            val builder = "${SupabaseConfig.URL}/rest/v1/stock_receiving"
                 .toHttpUrl()
                 .newBuilder()
                 .addQueryParameter("select", "product_id,qty,updated_at")
                 .addQueryParameter("order", "updated_at.desc")
-                .build()
+
+            // null = สินค้าไม่มีลอต (IS NULL), Long = สินค้าของลอตนั้น
+            if (lotId != null) {
+                builder.addQueryParameter("lot_id", "eq.$lotId")
+            } else {
+                builder.addQueryParameter("lot_id", "is.null")
+            }
+
+            val url = builder.build()
 
             val bearer = accessToken?.takeIf { it.isNotBlank() } ?: SupabaseConfig.ANON_KEY
 
@@ -120,9 +128,9 @@ object StockReceivingBrowseApi {
             map
         }
 
-    suspend fun fetchAll(accessToken: String?): List<StockReceivingItem> =
+    suspend fun fetchAll(accessToken: String?, lotId: Long? = null): List<StockReceivingItem> =
         withContext(Dispatchers.IO) {
-            val stock = fetchStockReceiving(accessToken)
+            val stock = fetchStockReceiving(accessToken, lotId)
             val ids = stock.map { it.first }
             val pmap = fetchProductsMap(ids, accessToken)
 

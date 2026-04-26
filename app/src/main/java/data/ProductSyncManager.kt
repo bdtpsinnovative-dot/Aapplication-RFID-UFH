@@ -10,7 +10,7 @@ import org.json.JSONArray
 object ProductSyncManager {
     private val client = OkHttpClient()
     private const val PAGE = 500
-    private const val MAX_AGE_MS = 6L * 60 * 60 * 1000 // 6 ชั่วโมง
+    private const val MAX_AGE_MS = 60L * 60 * 1000 // 1 ชั่วโมง
 
     suspend fun syncAll(
         ctx: Context,

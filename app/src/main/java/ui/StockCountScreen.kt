@@ -40,6 +40,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.runtime.snapshotFlow
+import data.AppError
 import data.AuthManager
 import data.DraftDatabase
 import data.SessionManager
@@ -353,7 +354,7 @@ fun StockCountScreen(onBack: () -> Unit) {
         } catch (e: Exception) {
             scanningOn = false
             bannerStatus = BannerStatus.ERROR
-            bannerText = "Scan Error: ${e.message}"
+            bannerText = AppError.resolve(e)
         }
     }
 
@@ -403,7 +404,7 @@ fun StockCountScreen(onBack: () -> Unit) {
             checked = true; resultTab = "GROUP"
             bannerStatus = BannerStatus.OK; bannerText = "ตรวจสอบสำเร็จ: ครบ ${found.size} / ขาด ${missing.size}"
         } catch (e: Exception) {
-            bannerStatus = BannerStatus.ERROR; bannerText = e.message ?: "Error"
+            bannerStatus = BannerStatus.ERROR; bannerText = AppError.resolve(e)
         } finally { checking = false }
     }
 
@@ -418,7 +419,7 @@ fun StockCountScreen(onBack: () -> Unit) {
             withContext(Dispatchers.IO) { db.clearStockCountDraft() }
             clearAll()
         } catch (e: Exception) {
-            bannerStatus = BannerStatus.ERROR; bannerText = e.message ?: "Error"
+            bannerStatus = BannerStatus.ERROR; bannerText = AppError.resolve(e)
         } finally { confirming = false }
     }
 
