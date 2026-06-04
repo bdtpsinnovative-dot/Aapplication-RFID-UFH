@@ -26,7 +26,7 @@ data class LotReceiveDraftRow(
     val expectedQty: Int
 )
 
-class DraftDatabase(ctx: Context) : SQLiteOpenHelper(ctx, "drafts.db", null, 3) {
+class DraftDatabase(ctx: Context) : SQLiteOpenHelper(ctx, "drafts.db", null, 4) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -62,6 +62,7 @@ class DraftDatabase(ctx: Context) : SQLiteOpenHelper(ctx, "drafts.db", null, 3) 
             """.trimIndent()
         )
         db.execSQL(CREATE_LOT_DRAFT)
+        db.execSQL(CREATE_RFID_BATCH_DRAFT)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -73,9 +74,21 @@ class DraftDatabase(ctx: Context) : SQLiteOpenHelper(ctx, "drafts.db", null, 3) 
         if (oldVersion < 3) {
             db.execSQL(CREATE_LOT_DRAFT)
         }
+        if (oldVersion < 4) {
+            db.execSQL(CREATE_RFID_BATCH_DRAFT)
+        }
     }
 
     companion object {
+        private const val CREATE_RFID_BATCH_DRAFT = """
+            CREATE TABLE IF NOT EXISTS rfid_batch_draft (
+                batch_num  INTEGER NOT NULL,
+                branch_id  INTEGER NOT NULL,
+                product_id INTEGER NOT NULL,
+                rfid       TEXT    NOT NULL,
+                PRIMARY KEY (batch_num, branch_id, product_id, rfid)
+            )
+        """
         private const val CREATE_LOT_DRAFT = """
             CREATE TABLE IF NOT EXISTS lot_receive_draft (
                 product_id   INTEGER NOT NULL,
@@ -310,5 +323,54 @@ class DraftDatabase(ctx: Context) : SQLiteOpenHelper(ctx, "drafts.db", null, 3) 
             "branch_id=? AND lot_id=?",
             arrayOf(branchId.toString(), lotId.toString())
         )
+    }
+
+    // ── RFID Batch Draft ─────────────────────────────────────────────────────
+
+    fun saveRfidBatches(batches: List<Pair<Int, Map<Long, List<String>>>>, branchId: Long) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.delete("rfid_batch_draft", "branch_id=?", arrayOf(branchId.toString()))
+            for ((batchNum, tags) in batches) {
+                for ((pid, rfids) in tags) {
+                    for (rfid in rfids) {
+                        db.insert("rfid_batch_draft", null, ContentValues().apply {
+                            put("batch_num",  batchNum)
+                            put("branch_id",  branchId)
+                            put("product_id", pid)
+                            put("rfid",       rfid)
+                        })
+                    }
+                }
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    // คืน Pair<maxBatchNum, Map<batchNum → Map<productId → [rfids]>>>
+    fun loadRfidBatches(branchId: Long): Pair<Int, Map<Int, Map<Long, List<String>>>> {
+        val map = mutableMapOf<Int, MutableMap<Long, MutableList<String>>>()
+        readableDatabase.rawQuery(
+            "SELECT batch_num, product_id, rfid FROM rfid_batch_draft WHERE branch_id=? ORDER BY batch_num ASC",
+            arrayOf(branchId.toString())
+        ).use { cur ->
+            while (cur.moveToNext()) {
+                val batchNum = cur.getInt(0)
+                val pid      = cur.getLong(1)
+                val rfid     = cur.getString(2) ?: continue
+                map.getOrPut(batchNum) { mutableMapOf() }
+                    .getOrPut(pid) { mutableListOf() }
+                    .add(rfid)
+            }
+        }
+        val maxBatchNum = if (map.isEmpty()) 0 else map.keys.max()
+        return Pair(maxBatchNum, map)
+    }
+
+    fun clearRfidBatches(branchId: Long) {
+        writableDatabase.delete("rfid_batch_draft", "branch_id=?", arrayOf(branchId.toString()))
     }
 }

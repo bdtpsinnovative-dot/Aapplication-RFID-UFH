@@ -29,9 +29,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontFamily
@@ -39,17 +39,18 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.runtime.snapshotFlow
+import coil.compose.AsyncImage
+import data.SessionStore
 import data.AppError
 import data.AuthManager
 import data.DraftDatabase
-import data.SessionManager
-import data.SupabaseConfig
+import data.ProductDatabase
+import data.FoundTag
+import data.GroupRow
+import data.SupabaseBatchCheckApi
+import data.SupabaseReaderStockApi
 
-// 👵🏼 Import ของเครื่องแรก (HC)
 import com.xlzn.hcpda.uhf.UHFReader
-
-// 👵🏼 Import ของเครื่องที่สอง (p8 - MagicRF)
 import android.hardware.UHFDevice
 import com.magicrf.uhfreaderlib.reader.UhfReader as MagicUhfReader
 import com.magicrf.uhfreaderlib.reader.Tools
@@ -59,34 +60,20 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONArray
-import org.json.JSONObject
-import java.net.URLEncoder
-import java.time.Instant
 
-// --- THEME & COLORS ---
-private val ColorPrimary = Color(0xFF4F46E5)
-private val ColorBg = Color(0xFFF1F5F9)
-private val ColorSurface = Color(0xFFFFFFFF)
-private val ColorSuccess = Color(0xFF10B981)
-private val ColorError = Color(0xFFEF4444)
-private val ColorWarning = Color(0xFFF59E0B)
-private val ColorTextMain = Color(0xFF1E293B)
-private val ColorTextSub = Color(0xFF64748B)
-
-private val GradientHeader = Brush.linearGradient(
-    listOf(Color(0xFF6366F1), Color(0xFF4338CA))
-)
+private val StockColorBg = Color(0xFFF1F5F9)
+private val StockColorPrimary = Color(0xFF6366F1)
+private val StockColorSuccess = Color(0xFF22C55E)
+private val StockColorWarning = Color(0xFFF59E0B)
+private val StockColorTextMain = Color(0xFF1E293B)
+private val StockColorSurface = Color(0xFFFFFFFF)
+private val StockColorError = Color(0xFFEF4444)
+private val StockColorTextSub = Color(0xFF64748B)
+private val StockGradientHeader = Brush.linearGradient(listOf(Color(0xFF6366F1), Color(0xFF4338CA)))
 
 private enum class BannerStatus { NONE, OK, WARN, ERROR }
 
 
-private data class FoundTag(val rfid: String, val productId: Long, val productName: String?)
-private data class GroupRow(val productId: Long, val name: String, val qty: Long)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -95,13 +82,12 @@ fun StockCountScreen(onBack: () -> Unit) {
     val lifecycleOwner = LocalLifecycleOwner.current
     val context = LocalContext.current
 
+    // เรียกใช้ ProductDatabase
+    val productDb = remember { ProductDatabase(context) }
+
     // --- SDK STATE ---
     var isReaderConnected by remember { mutableStateOf(false) }
-
-    // ตัวแปรเก็บ Hardware ของเครื่อง HC
     var hcReader by remember { mutableStateOf<UHFReader?>(null) }
-
-    // ตัวแปรเก็บ Hardware ของเครื่อง P8 (MagicRF)
     var p8Device by remember { mutableStateOf<UHFDevice?>(null) }
     var p8Reader by remember { mutableStateOf<MagicUhfReader?>(null) }
 
@@ -125,14 +111,14 @@ fun StockCountScreen(onBack: () -> Unit) {
 
     fun beep() {
         val now = System.currentTimeMillis()
-        if (now - lastBeepMs < 200) return   // cooldown — กัน startTone ซ้อนกัน
+        if (now - lastBeepMs < 200) return
         lastBeepMs = now
         try { toneGen.startTone(ToneGenerator.TONE_PROP_BEEP, 120) } catch (_: Exception) {}
     }
 
-    val scannedList  = remember { mutableStateListOf<String>() }   // unique ordered — ใช้ save/check/display
-    val scanLog      = remember { mutableStateListOf<String>() }   // ทุก scan — ใช้นับ total
-    val scanCountMap = remember { mutableStateMapOf<String, Int>() } // tag → จำนวนครั้ง
+    val scannedList  = remember { mutableStateListOf<String>() }
+    val scanLog      = remember { mutableStateListOf<String>() }
+    val scanCountMap = remember { mutableStateMapOf<String, Int>() }
     val scannedSet  = remember { HashSet<String>() }
     val queuedSet   = remember { HashSet<String>() }
     var dupIgnored by remember { mutableStateOf(0) }
@@ -152,7 +138,6 @@ fun StockCountScreen(onBack: () -> Unit) {
         if (!scanningOn) { bannerStatus = BannerStatus.NONE; bannerText = null }
     }
 
-    // 1. Permission Request
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
@@ -167,7 +152,6 @@ fun StockCountScreen(onBack: () -> Unit) {
     }
 
     LaunchedEffect(Unit) {
-        // โหลด draft tag ที่ค้างไว้จาก SQLite
         val saved = withContext(Dispatchers.IO) { db.loadStockCountDraft() }
         if (saved.isNotEmpty()) {
             for (rfid in saved) {
@@ -188,7 +172,6 @@ fun StockCountScreen(onBack: () -> Unit) {
         )
     }
 
-    // Auto-save draft หลัง draftLoaded=true เท่านั้น ป้องกัน race condition
     LaunchedEffect(draftLoaded) {
         if (!draftLoaded) return@LaunchedEffect
         snapshotFlow { scannedList.toList() }
@@ -197,18 +180,15 @@ fun StockCountScreen(onBack: () -> Unit) {
             }
     }
 
-    // 2. SDK INIT (แยกสายเชื่อมต่อ)
     LaunchedEffect(permissionGranted) {
         if (!permissionGranted) return@LaunchedEffect
 
         withContext(Dispatchers.IO) {
-
-            // ตรวจ model name — ถ้าไม่รู้จักให้ลอง HC ก่อน (ปลอดภัยกว่า MagicRF)
             currentDeviceType = when {
                 deviceModel.contains("HC", ignoreCase = true) -> DeviceType.HC
                 deviceModel.contains("p8", ignoreCase = true) ||
-                deviceModel.contains("uhf", ignoreCase = true) ||
-                deviceModel.contains("magic", ignoreCase = true) -> DeviceType.P8_MAGICRF
+                        deviceModel.contains("uhf", ignoreCase = true) ||
+                        deviceModel.contains("magic", ignoreCase = true) -> DeviceType.P8_MAGICRF
                 else -> DeviceType.HC
             }
 
@@ -217,7 +197,6 @@ fun StockCountScreen(onBack: () -> Unit) {
                 bannerText = "Model: $deviceModel → ลอง ${currentDeviceType.name}..."
             }
 
-            // ลอง HC
             var hcOk = false
             if (currentDeviceType == DeviceType.HC) {
                 var retry = 0
@@ -261,7 +240,6 @@ fun StockCountScreen(onBack: () -> Unit) {
                 }
             }
 
-            // ลอง MagicRF (ถ้า P8 หรือ HC ไม่สำเร็จ)
             if (!hcOk && (currentDeviceType == DeviceType.P8_MAGICRF || !isReaderConnected)) {
                 try {
                     withContext(Dispatchers.Main) { bannerStatus = BannerStatus.WARN; bannerText = "กำลังเชื่อมต่อ MagicRF..." }
@@ -293,7 +271,6 @@ fun StockCountScreen(onBack: () -> Unit) {
         }
     }
 
-    // --- LIFECYCLE CLEANUP ---
     DisposableEffect(lifecycleOwner) {
         onDispose {
             try {
@@ -309,7 +286,6 @@ fun StockCountScreen(onBack: () -> Unit) {
         }
     }
 
-    // --- SCAN CONTROL ---
     LaunchedEffect(scanningOn) {
         if (!isReaderConnected) return@LaunchedEffect
 
@@ -322,7 +298,6 @@ fun StockCountScreen(onBack: () -> Unit) {
                 if (currentDeviceType == DeviceType.HC) {
                     hcReader?.startInventory()
                 } else if (currentDeviceType == DeviceType.P8_MAGICRF) {
-                    // 🔵 เครื่อง P8 ต้องเขียนลูปวนถามข้อมูล (Polling)
                     while (scanningOn) {
                         withContext(Dispatchers.IO) {
                             val epcList = p8Reader?.inventoryRealTime()
@@ -334,22 +309,18 @@ fun StockCountScreen(onBack: () -> Unit) {
                                     }
                                 }
                             }
-                            delay(80) // ดีเลย์ตามโค้ดโรงงาน
+                            delay(80)
                         }
                     }
                 }
-
             } else {
                 if (currentDeviceType == DeviceType.HC) {
                     hcReader?.stopInventory()
                 }
-                // เครื่อง P8 ไม่ต้องทำอะไร แค่ค่า scanningOn เป็น false ลูปข้างบนก็จะหยุดเองจ้ะ
-
                 bannerStatus = BannerStatus.NONE
                 bannerText = null
             }
         } catch (e: kotlinx.coroutines.CancellationException) {
-            // coroutine ถูก cancel ตามปกติ (เช่น กดหยุดยิง) — ไม่ใช่ error ไม่ต้องแสดงอะไร
             throw e
         } catch (e: Exception) {
             scanningOn = false
@@ -358,20 +329,18 @@ fun StockCountScreen(onBack: () -> Unit) {
         }
     }
 
-    // --- DATA PROCESSOR ---
     LaunchedEffect(Unit) {
         for (tag in scanCh) {
             scanningBusy = true
             if (checked) resetResultsBecauseNewScan()
 
-            // นับทุก scan (รวมซ้ำ)
             scanLog.add(tag)
             scanCountMap[tag] = (scanCountMap[tag] ?: 0) + 1
 
             if (!scannedSet.contains(tag)) {
                 scannedSet.add(tag)
                 queuedSet.add(tag)
-                scannedList.add(0, tag)  // ใหม่สุดขึ้นบน
+                scannedList.add(0, tag)
                 beep()
             } else {
                 dupIgnored += 1
@@ -414,7 +383,11 @@ fun StockCountScreen(onBack: () -> Unit) {
         try {
             val groups = groupedFound()
             val validToken = AuthManager.getValidAccessToken(context)
-            SupabaseReaderStockApi.upsertFromCounts(groups, validToken)
+            val storedBranchId = SessionStore.getBranchId(context)
+            val finalBranchId = if (storedBranchId > 0) storedBranchId else 1L
+
+            SupabaseReaderStockApi.upsertFromCounts(groups, finalBranchId, validToken)
+
             bannerStatus = BannerStatus.OK; bannerText = "บันทึกสต๊อกเรียบร้อย (${groups.size} รายการ)"
             withContext(Dispatchers.IO) { db.clearStockCountDraft() }
             clearAll()
@@ -423,15 +396,14 @@ fun StockCountScreen(onBack: () -> Unit) {
         } finally { confirming = false }
     }
 
-    // --- UI CODE ---
     Scaffold(
-        containerColor = ColorBg,
+        containerColor = StockColorBg,
         topBar = {
             TopAppBar(
-                title = { Text("RFID Stock Count", fontWeight = FontWeight.Bold, color = ColorTextMain) },
+                title = { Text("RFID Stock Count", fontWeight = FontWeight.Bold, color = StockColorTextMain) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.Rounded.ArrowBackIosNew, null, tint = ColorTextMain)
+                        Icon(Icons.Rounded.ArrowBackIosNew, null, tint = StockColorTextMain)
                     }
                 },
                 actions = {
@@ -442,26 +414,26 @@ fun StockCountScreen(onBack: () -> Unit) {
                         Icon(
                             Icons.Filled.DeleteSweep,
                             null,
-                            tint = if (scannedList.isNotEmpty()) ColorError else Color.LightGray
+                            tint = if (scannedList.isNotEmpty()) StockColorError else Color.LightGray
                         )
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = ColorBg)
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = StockColorBg)
             )
         },
         bottomBar = {
             Surface(
                 tonalElevation = 24.dp,
                 shadowElevation = 24.dp,
-                color = ColorSurface,
+                color = StockColorSurface,
                 shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
             ) {
                 Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp).navigationBarsPadding()) {
                     AnimatedVisibility(visible = bannerText != null && bannerStatus != BannerStatus.NONE) {
                         val (bg, txt, icon) = when (bannerStatus) {
-                            BannerStatus.OK -> Triple(ColorSuccess.copy(0.1f), ColorSuccess, Icons.Rounded.CheckCircle)
-                            BannerStatus.WARN -> Triple(ColorWarning.copy(0.1f), ColorWarning, Icons.Rounded.Warning)
-                            BannerStatus.ERROR -> Triple(ColorError.copy(0.1f), ColorError, Icons.Rounded.Error)
+                            BannerStatus.OK -> Triple(StockColorSuccess.copy(0.1f), StockColorSuccess, Icons.Rounded.CheckCircle)
+                            BannerStatus.WARN -> Triple(StockColorWarning.copy(0.1f), StockColorWarning, Icons.Rounded.Warning)
+                            BannerStatus.ERROR -> Triple(StockColorError.copy(0.1f), StockColorError, Icons.Rounded.Error)
                             else -> Triple(Color.Gray.copy(0.1f), Color.Gray, Icons.Rounded.Info)
                         }
                         Row(
@@ -476,7 +448,7 @@ fun StockCountScreen(onBack: () -> Unit) {
                     }
 
                     Row(Modifier.height(42.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        val scanColor by animateColorAsState(if (scanningOn) ColorError else ColorPrimary)
+                        val scanColor by animateColorAsState(if (scanningOn) StockColorError else StockColorPrimary)
                         Button(
                             onClick = {
                                 if (!isReaderConnected) {
@@ -501,7 +473,7 @@ fun StockCountScreen(onBack: () -> Unit) {
                                 onClick = { scope.launch { confirmToReaderStock() } },
                                 modifier = Modifier.weight(1f).fillMaxHeight(),
                                 shape = RoundedCornerShape(12.dp),
-                                colors = ButtonDefaults.buttonColors(containerColor = ColorSuccess),
+                                colors = ButtonDefaults.buttonColors(containerColor = StockColorSuccess),
                                 enabled = found.isNotEmpty() && !confirming,
                                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp)
                             ) {
@@ -534,26 +506,21 @@ fun StockCountScreen(onBack: () -> Unit) {
         }
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
-
-            // ── Compact Stats Bar ─────────────────────────────────────────────
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 12.dp, vertical = 6.dp)
                     .clip(RoundedCornerShape(16.dp))
-                    .background(GradientHeader)
+                    .background(StockGradientHeader)
                     .padding(horizontal = 16.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                // ── total reads ──
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text("R", color = Color.White.copy(0.75f), fontSize = 10.sp, fontWeight = FontWeight.Bold)
                     Text("${scanLog.size}", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 22.sp)
                 }
-                // ── divider ──
                 Box(Modifier.width(1.dp).height(28.dp).background(Color.White.copy(0.3f)))
-                // ── unique count ──
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text("I", color = Color.White.copy(0.75f), fontSize = 10.sp, fontWeight = FontWeight.Bold)
                     Text("${scannedList.size}", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 22.sp)
@@ -561,7 +528,6 @@ fun StockCountScreen(onBack: () -> Unit) {
 
                 Spacer(Modifier.weight(1f))
 
-                // ── pulse icon ──
                 Box(contentAlignment = Alignment.Center, modifier = Modifier.size(40.dp)) {
                     if (scanningOn) {
                         val infiniteTransition = rememberInfiniteTransition()
@@ -587,7 +553,7 @@ fun StockCountScreen(onBack: () -> Unit) {
                         val count = scanCountMap[tag] ?: 1
                         Card(
                             modifier = Modifier.fillMaxWidth(),
-                            colors = CardDefaults.cardColors(containerColor = if (idx == 0) ColorSuccess.copy(0.05f) else ColorSurface),
+                            colors = CardDefaults.cardColors(containerColor = if (idx == 0) StockColorSuccess.copy(0.05f) else StockColorSurface),
                             shape = RoundedCornerShape(8.dp),
                             elevation = CardDefaults.cardElevation(0.dp)
                         ) {
@@ -600,7 +566,7 @@ fun StockCountScreen(onBack: () -> Unit) {
                                     "#${scannedList.size - idx}",
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold,
-                                    color = ColorPrimary,
+                                    color = StockColorPrimary,
                                     modifier = Modifier.width(34.dp)
                                 )
                                 Text(
@@ -608,7 +574,7 @@ fun StockCountScreen(onBack: () -> Unit) {
                                     fontSize = 13.sp,
                                     fontFamily = FontFamily.Monospace,
                                     fontWeight = FontWeight.Medium,
-                                    color = ColorTextMain,
+                                    color = StockColorTextMain,
                                     modifier = Modifier.weight(1f)
                                 )
                                 if (count > 1) {
@@ -616,7 +582,7 @@ fun StockCountScreen(onBack: () -> Unit) {
                                         "×$count",
                                         fontSize = 13.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = ColorWarning
+                                        color = StockColorWarning
                                     )
                                 }
                             }
@@ -627,26 +593,69 @@ fun StockCountScreen(onBack: () -> Unit) {
                         "GROUP" -> {
                             val groups = groupedFound()
                             itemsIndexed(groups) { _, item ->
+                                // ดึงข้อมูล Product จาก DB ท้องถิ่นผ่าน productId
+                                val product = remember(item.productId) { productDb.findById(item.productId) }
+
                                 Card(
                                     modifier = Modifier.fillMaxWidth(),
-                                    colors = CardDefaults.cardColors(containerColor = ColorSurface),
+                                    colors = CardDefaults.cardColors(containerColor = StockColorSurface),
                                     shape = RoundedCornerShape(16.dp),
                                     elevation = CardDefaults.cardElevation(2.dp)
                                 ) {
                                     Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                                        Box(
-                                            Modifier.size(44.dp).background(ColorPrimary.copy(0.08f), CircleShape),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Text(item.name.take(1).uppercase(), color = ColorPrimary, fontWeight = FontWeight.Black, fontSize = 18.sp)
+                                        // แสดงรูปภาพ หรือ Fallback ตัวอักษร
+                                        if (!product?.imageUrl.isNullOrBlank()) {
+                                            AsyncImage(
+                                                model = product?.imageUrl,
+                                                contentDescription = product?.name,
+                                                modifier = Modifier
+                                                    .size(48.dp)
+                                                    .clip(RoundedCornerShape(8.dp))
+                                                    .background(StockColorBg),
+                                                contentScale = ContentScale.Crop
+                                            )
+                                        } else {
+                                            Box(
+                                                Modifier
+                                                    .size(48.dp)
+                                                    .background(StockColorPrimary.copy(0.08f), RoundedCornerShape(8.dp)),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Text(
+                                                    text = item.name.take(1).uppercase(),
+                                                    color = StockColorPrimary,
+                                                    fontWeight = FontWeight.Black,
+                                                    fontSize = 18.sp
+                                                )
+                                            }
                                         }
+
                                         Spacer(Modifier.width(16.dp))
+
+                                        // แสดงชื่อสินค้าและ SKU
                                         Column(Modifier.weight(1f)) {
-                                            Text(item.name, fontWeight = FontWeight.Bold, fontSize = 16.sp, color = ColorTextMain, maxLines = 1)
-                                            Text("ID: ${item.productId}", style = MaterialTheme.typography.labelMedium, color = ColorTextSub)
+                                            Text(
+                                                text = product?.name ?: item.name,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 16.sp,
+                                                color = StockColorTextMain,
+                                                maxLines = 1
+                                            )
+                                            Text(
+                                                text = "SKU: ${product?.sku ?: "-"}",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                color = StockColorTextSub
+                                            )
                                         }
-                                        Surface(color = ColorPrimary, shape = RoundedCornerShape(8.dp)) {
-                                            Text("x${item.qty}", Modifier.padding(horizontal = 10.dp, vertical = 4.dp), color = Color.White, fontWeight = FontWeight.Bold)
+
+                                        // จำนวนที่สแกนเจอ
+                                        Surface(color = StockColorPrimary, shape = RoundedCornerShape(8.dp)) {
+                                            Text(
+                                                text = "x${item.qty}",
+                                                Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                                color = Color.White,
+                                                fontWeight = FontWeight.Bold
+                                            )
                                         }
                                     }
                                 }
@@ -662,17 +671,17 @@ fun StockCountScreen(onBack: () -> Unit) {
         if (showCheckDialog) {
             AlertDialog(
                 onDismissRequest = { showCheckDialog = false },
-                icon = { Icon(Icons.Rounded.HelpOutline, null, tint = ColorPrimary, modifier = Modifier.size(32.dp)) },
+                icon = { Icon(Icons.Rounded.HelpOutline, null, tint = StockColorPrimary, modifier = Modifier.size(32.dp)) },
                 title = { Text("ยืนยันการตรวจสอบ", fontWeight = FontWeight.Bold) },
                 text = { Text("ข้อมูลถูกต้องแล้วใช่หรือไม่?", textAlign = TextAlign.Center) },
                 confirmButton = {
                     Button(
                         onClick = { showCheckDialog = false; scope.launch { doCheck() } },
-                        colors = ButtonDefaults.buttonColors(containerColor = ColorPrimary)
+                        colors = ButtonDefaults.buttonColors(containerColor = StockColorPrimary)
                     ) { Text("ยืนยัน", fontWeight = FontWeight.Bold) }
                 },
-                dismissButton = { TextButton(onClick = { showCheckDialog = false }) { Text("ยกเลิก", color = ColorTextSub) } },
-                containerColor = ColorSurface, shape = RoundedCornerShape(16.dp)
+                dismissButton = { TextButton(onClick = { showCheckDialog = false }) { Text("ยกเลิก", color = StockColorTextSub) } },
+                containerColor = StockColorSurface, shape = RoundedCornerShape(16.dp)
             )
         }
     }
@@ -682,81 +691,23 @@ fun StockCountScreen(onBack: () -> Unit) {
 fun ResultRow(title: String, subtitle: String, isSuccess: Boolean) {
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = ColorSurface),
+        colors = CardDefaults.cardColors(containerColor = StockColorSurface),
         shape = RoundedCornerShape(12.dp),
-        border = if (!isSuccess) BorderStroke(1.dp, ColorError.copy(0.2f)) else null,
+        border = if (!isSuccess) BorderStroke(1.dp, StockColorError.copy(0.2f)) else null,
         elevation = CardDefaults.cardElevation(if (isSuccess) 0.5.dp else 0.dp)
     ) {
         Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
             Icon(
                 if (isSuccess) Icons.Rounded.CheckCircle else Icons.Rounded.HighlightOff,
                 null,
-                tint = if (isSuccess) ColorSuccess else ColorError,
+                tint = if (isSuccess) StockColorSuccess else StockColorError,
                 modifier = Modifier.size(22.dp)
             )
             Spacer(Modifier.width(14.dp))
             Column {
-                Text(title, fontWeight = FontWeight.SemiBold, fontFamily = FontFamily.Monospace, color = ColorTextMain, fontSize = 16.sp)
-                Text(subtitle, style = MaterialTheme.typography.bodySmall, color = if (isSuccess) ColorTextSub else ColorError)
+                Text(title, fontWeight = FontWeight.SemiBold, fontFamily = FontFamily.Monospace, color = StockColorTextMain, fontSize = 16.sp)
+                Text(subtitle, style = MaterialTheme.typography.bodySmall, color = if (isSuccess) StockColorTextSub else StockColorError)
             }
         }
-    }
-}
-
-private object SupabaseBatchCheckApi {
-    private val client = OkHttpClient()
-    private fun bearer(t: String?): String = t?.takeIf { it.isNotBlank() } ?: SupabaseConfig.ANON_KEY
-    private fun quoteForIn(v: String) = "\"${v.replace("\\", "\\\\").replace("\"", "\\\"")}\""
-
-    suspend fun lookupMany(rfids: List<String>, accessToken: String?): List<FoundTag> {
-        if (rfids.isEmpty()) return emptyList()
-        val out = ArrayList<FoundTag>()
-        val chunks = rfids.distinct().chunked(120)
-        for (chunk in chunks) {
-            val inList = chunk.joinToString(",") { quoteForIn(it) }
-            val filter = URLEncoder.encode("in.($inList)", "UTF-8")
-            val url = "${SupabaseConfig.URL}/rest/v1/product_rfid_tags?select=rfid,product_id,products(name)&rfid=$filter"
-            val req = Request.Builder().url(url).get()
-                .addHeader("apikey", SupabaseConfig.ANON_KEY)
-                .addHeader("Authorization", "Bearer ${bearer(accessToken)}")
-                .build()
-            val res = withContext(Dispatchers.IO) { client.newCall(req).execute() }
-            res.use {
-                if (!it.isSuccessful) throw IllegalStateException("Lookup failed: ${it.code}")
-                val arr = JSONArray(it.body?.string().orEmpty())
-                for (i in 0 until arr.length()) {
-                    val o = arr.getJSONObject(i)
-                    val rfid = o.optString("rfid")
-                    val pid = o.optLong("product_id", -1L)
-                    val name = o.optJSONObject("products")?.optString("name")
-                    if (rfid.isNotBlank() && pid > 0) out.add(FoundTag(rfid, pid, name))
-                }
-            }
-        }
-        return out
-    }
-}
-
-private object SupabaseReaderStockApi {
-    private val client = OkHttpClient()
-    private val media = "application/json; charset=utf-8".toMediaType()
-    private fun bearer(t: String?): String = t?.takeIf { it.isNotBlank() } ?: SupabaseConfig.ANON_KEY
-
-    suspend fun upsertFromCounts(groups: List<GroupRow>, accessToken: String?) {
-        val nowIso = Instant.now().toString()
-        val arr = JSONArray()
-        for (g in groups) {
-            arr.put(JSONObject().put("product_id", g.productId).put("qty", g.qty).put("updated_at", nowIso))
-        }
-        val req = Request.Builder()
-            .url("${SupabaseConfig.URL}/rest/v1/reader_stock?on_conflict=product_id")
-            .post(arr.toString().toRequestBody(media))
-            .addHeader("apikey", SupabaseConfig.ANON_KEY)
-            .addHeader("Authorization", "Bearer ${bearer(accessToken)}")
-            .addHeader("Content-Type", "application/json")
-            .addHeader("Prefer", "resolution=merge-duplicates,return=minimal")
-            .build()
-        val res = withContext(Dispatchers.IO) { client.newCall(req).execute() }
-        res.use { if (!it.isSuccessful) throw IllegalStateException("Upsert failed: ${it.code}") }
     }
 }

@@ -1,801 +1,755 @@
 package ui
 
+import android.Manifest
+import android.media.AudioManager
+import android.media.ToneGenerator
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons as MIcons
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.outlined.CheckCircle
-import androidx.compose.material.icons.outlined.ErrorOutline
-import androidx.compose.material.icons.outlined.Image
-import androidx.compose.material.icons.outlined.Inventory2
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
-import data.AppError
-import data.SessionManager
-import data.SupabaseConfig
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONArray
-import org.json.JSONObject
-import java.net.URLEncoder
-import java.time.Instant
-import kotlin.math.abs
 
-/* ----------------------------- Models ----------------------------- */
+import com.xlzn.hcpda.uhf.UHFReader
+import android.hardware.UHFDevice
+import com.magicrf.uhfreaderlib.reader.UhfReader as MagicUhfReader
+import com.magicrf.uhfreaderlib.reader.Tools
+import data.StockSearchApi
+import data.TargetRfidItem
 
-private data class ReaderRow(val productId: Long, val qty: Long)
-private data class StockRow(val productId: Long, val qty: Double)
+private enum class CompareDeviceType { UNKNOWN, HC, P8_MAGICRF }
+private enum class CompareBannerStatus { NONE, OK, WARN, ERROR }
 
-/** ✅ ใช้ “ราคาขาย” */
-private data class CompareProductRow(
-    val id: Long,
-    val name: String,
-    val unit: String?,
-    val imageUrl: String?,
-    val price: Double
-)
-
-private data class CompareRow(
-    val productId: Long,
-    val name: String,
-    val unit: String?,
-    val imageUrl: String?,
-    val price: Double,
-    val systemQty: Double,
-    val countedQty: Long,
-    val diff: Double,
-    val valueDiff: Double,
-    val valueDiffAbs: Double
-)
-
-private enum class BannerState { NONE, OK, WARN, ERROR }
-
-/* ----------------------------- Screen ----------------------------- */
-/**
- * ✅ ตั้งชื่อ V2 เพื่อ “ตัดปัญหา Conflicting overloads ของ CompareStockScreen”
- * แล้วไปแก้ AppNav ให้เรียก CompareStockScreenV2 แทน
- */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun CompareStockScreenV2(onBack: () -> Unit) {
+fun CompareScreen(onBack: () -> Unit = {}) {
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val lifecycleOwner = LocalLifecycleOwner.current
 
-    var loading by remember { mutableStateOf(false) }
-    var confirming by remember { mutableStateOf(false) }
+    // --- State สำหรับ Hardware & Status ---
+    var isReaderConnected by remember { mutableStateOf(false) }
+    var hcReader by remember { mutableStateOf<UHFReader?>(null) }
+    var p8Device by remember { mutableStateOf<UHFDevice?>(null) }
+    var p8Reader by remember { mutableStateOf<MagicUhfReader?>(null) }
 
-    var bannerText by remember { mutableStateOf<String?>(null) }
-    var bannerState by remember { mutableStateOf(BannerState.NONE) }
+    var currentDeviceType by remember { mutableStateOf(CompareDeviceType.UNKNOWN) }
+    val deviceModel = remember { android.os.Build.MODEL }
+    var permissionGranted by remember { mutableStateOf(false) }
+    var scanningOn by remember { mutableStateOf(false) }
 
-    var rows by remember { mutableStateOf<List<CompareRow>>(emptyList()) }
+    // --- State สำหรับ UX หน้างาน ---
+    var totalScannedCount by remember { mutableStateOf(0) }
+    var isLocked by remember { mutableStateOf(false) }
 
-    // ✅ ปุ่มเดียว สลับ แสดงเฉพาะที่ต่าง / แสดงทั้งหมด
-    var showOnlyDiff by remember { mutableStateOf(true) }
+    val foundProductIds = remember { mutableStateListOf<Long>() }
+    var showOverviewDialog by remember { mutableStateOf(false) }
+    var isDeleting by remember { mutableStateOf(false) }
 
-    val headerBrush = remember {
-        Brush.linearGradient(listOf(Color(0xFF6A11CB), Color(0xFF2575FC)))
+    var bannerText by remember { mutableStateOf<String?>("Model: $deviceModel | Mfr: ${android.os.Build.MANUFACTURER}") }
+    var bannerStatus by remember { mutableStateOf(CompareBannerStatus.WARN) }
+
+    // --- State ของข้อมูล ---
+    var targetMap by remember { mutableStateOf<Map<String, TargetRfidItem>>(emptyMap()) }
+    var isLoading by remember { mutableStateOf(true) }
+    var currentFoundItem by remember { mutableStateOf<TargetRfidItem?>(null) }
+
+    val uniqueTargetsCount = remember(targetMap) { targetMap.values.distinctBy { it.productId }.size }
+    val scanCh = remember { Channel<String>(capacity = 4096) }
+
+    // เสียงเตือน
+    val toneGen = remember { ToneGenerator(AudioManager.STREAM_MUSIC, ToneGenerator.MAX_VOLUME) }
+    DisposableEffect(Unit) { onDispose { try { toneGen.release() } catch (_: Exception) {} } }
+
+    fun normalizeToken(raw: String): String {
+        return raw.trim().replace(" ", "").uppercase()
     }
 
-    fun setBanner(state: BannerState, text: String?) {
-        bannerState = state
-        bannerText = text
-    }
-
-    val diffRows by remember(rows) {
-        derivedStateOf { rows.filter { abs(it.diff) > 0.0005 } }
-    }
-
-    // ✅ 4 ช่องสรุป
-    val diffCount by remember(diffRows) { derivedStateOf { diffRows.size } } // “จำนวนรายการที่ต่าง”
-    val valueDiffNet by remember(diffRows) { derivedStateOf { diffRows.sumOf { it.valueDiff } } } // +/-
-    val damageValue by remember(diffRows) {
-        derivedStateOf { diffRows.filter { it.diff < -0.0005 }.sumOf { (-it.diff) * it.price } }
-    }
-    val overValue by remember(diffRows) {
-        derivedStateOf { diffRows.filter { it.diff > 0.0005 }.sumOf { it.diff * it.price } }
-    }
-
-    fun load() {
-        scope.launch {
-            loading = true
-            setBanner(BannerState.NONE, null)
-            try {
-                val reader = SupabaseCompareApi.fetchReaderStock(SessionManager.accessToken)
-                val readerMap = reader.associate { it.productId to it.qty }
-
-                val stock = SupabaseCompareApi.fetchSystemStock(SessionManager.accessToken)
-                val stockMap = stock.associate { it.productId to it.qty }
-
-                val ids = (readerMap.keys + stockMap.keys).distinct().sorted()
-                if (ids.isEmpty()) {
-                    rows = emptyList()
-                    setBanner(BannerState.WARN, "ยังไม่มีข้อมูลสำหรับเทียบ")
-                    return@launch
-                }
-
-                val prodList = SupabaseCompareApi.fetchProductsByIds(ids, SessionManager.accessToken)
-                val prodMap = prodList.associateBy { it.id }
-
-                val built = ids.map { pid ->
-                    val p = prodMap[pid]
-                    val name = p?.name ?: "สินค้า #$pid"
-                    val unit = p?.unit
-                    val img = p?.imageUrl
-                    val price = p?.price ?: 0.0
-
-                    val systemQty = stockMap[pid] ?: 0.0
-                    val countedQty = readerMap[pid] ?: 0L
-
-                    val diff = countedQty.toDouble() - systemQty
-                    val valueDiff = diff * price
-                    val valueDiffAbs = abs(valueDiff)
-
-                    CompareRow(
-                        productId = pid,
-                        name = name,
-                        unit = unit,
-                        imageUrl = img,
-                        price = price,
-                        systemQty = systemQty,
-                        countedQty = countedQty,
-                        diff = diff,
-                        valueDiff = valueDiff,
-                        valueDiffAbs = valueDiffAbs
-                    )
-                }.sortedWith(
-                    compareByDescending<CompareRow> { abs(it.diff) > 0.0005 }
-                        .thenByDescending { it.valueDiffAbs }
-                )
-
-                rows = built
-                setBanner(BannerState.NONE, null)
-
-            } catch (e: Exception) {
-                setBanner(BannerState.ERROR, AppError.resolve(e))
-            } finally {
-                loading = false
-            }
+    // 1. ขอ Permission
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        if (permissions.values.all { it }) {
+            permissionGranted = true
+            bannerText = "กำลังตรวจสอบรุ่นเครื่อง Hardware..."
+        } else {
+            bannerStatus = CompareBannerStatus.ERROR
+            bannerText = "ต้องการ Permission เพื่อเชื่อมต่อ Hardware"
         }
     }
 
-    fun confirmApply() {
-        scope.launch {
-            confirming = true
-            setBanner(BannerState.NONE, null)
-            try {
-                val nowIso = Instant.now().toString()
+    // 2. โหลดข้อมูลเป้าหมายลง RAM
+    LaunchedEffect(Unit) {
+        permissionLauncher.launch(
+            arrayOf(
+                Manifest.permission.READ_PHONE_STATE,
+                Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                Manifest.permission.READ_EXTERNAL_STORAGE
+            )
+        )
+        try {
+            targetMap = StockSearchApi.getPreloadedTargets(context)
+        } catch (e: Exception) {
+            bannerStatus = CompareBannerStatus.ERROR
+            bannerText = "โหลดคิวค้นหาพัง: ${e.message}"
+        } finally {
+            isLoading = false
+        }
+    }
 
-                SupabaseCompareApi.resetAllStockToZero(nowIso, SessionManager.accessToken)
-
-                val reader = SupabaseCompareApi.fetchReaderStock(SessionManager.accessToken)
-                val readerMap = reader.associate { it.productId to it.qty }
-
-                val setItems = readerMap.entries.map { (pid, qty) ->
-                    StockUpsert(id = pid, qty = qty.toDouble(), updatedAt = nowIso)
-                }
-                SupabaseCompareApi.upsertStock(setItems, SessionManager.accessToken)
-
-                val moveSessionId = System.currentTimeMillis()
-                val movements = rows
-                    .filter { abs(it.diff) > 0.0005 }
-                    .map { r ->
-                        StockMovementInsert(
-                            productIdText = r.productId.toString(),
-                            productIdBigint = r.productId,
-                            type = "COMPARE_ADJUST",
-                            qty = r.diff,
-                            note = "ปรับสต๊อกจากการเทียบ",
-                            refType = "READER_STOCK_COMPARE",
-                            refIdBigint = moveSessionId
-                        )
+    // 3. ลอจิกเชื่อมต่อ Hardware
+    LaunchedEffect(permissionGranted) {
+        if (!permissionGranted) return@LaunchedEffect
+        withContext(Dispatchers.IO) {
+            currentDeviceType = when {
+                deviceModel.contains("HC", ignoreCase = true) -> CompareDeviceType.HC
+                deviceModel.contains("p8", ignoreCase = true) ||
+                        deviceModel.contains("uhf", ignoreCase = true) ||
+                        deviceModel.contains("magic", ignoreCase = true) -> CompareDeviceType.P8_MAGICRF
+                else -> CompareDeviceType.HC
+            }
+            var hcOk = false
+            if (currentDeviceType == CompareDeviceType.HC) {
+                var retry = 0
+                while (retry < 3 && !hcOk) {
+                    try {
+                        val reader = UHFReader.getInstance()
+                        if (reader != null && reader.connect(context)?.data == true) {
+                            delay(500)
+                            reader.setPower(30)
+                            reader.setOnInventoryDataListener { tagsList ->
+                                if (!tagsList.isNullOrEmpty()) {
+                                    for (tag in tagsList) {
+                                        val rfid = tag.ecpHex
+                                        if (!rfid.isNullOrEmpty()) scanCh.trySend(normalizeToken(rfid))
+                                    }
+                                }
+                            }
+                            hcReader = reader
+                            isReaderConnected = true
+                            hcOk = true
+                            withContext(Dispatchers.Main) {
+                                bannerStatus = CompareBannerStatus.OK
+                                bannerText = "พร้อมค้นหา (HC | $deviceModel)"
+                            }
+                        } else {
+                            retry++
+                            delay(1500)
+                        }
+                    } catch (t: Throwable) {
+                        retry++
+                        delay(1500)
                     }
-
-                if (movements.isNotEmpty()) {
-                    SupabaseCompareApi.insertMovements(movements, SessionManager.accessToken)
                 }
-
-                SupabaseCompareApi.clearReaderStock(SessionManager.accessToken)
-
-                setBanner(BannerState.OK, "ยืนยันสำเร็จ ✅ ปรับสต๊อกแล้ว และล้างข้อมูลนับแล้ว")
-                load()
-
-            } catch (e: Exception) {
-                setBanner(BannerState.ERROR, AppError.resolve(e))
-            } finally {
-                confirming = false
+            }
+            if (!hcOk && (currentDeviceType == CompareDeviceType.P8_MAGICRF || !isReaderConnected)) {
+                try {
+                    currentDeviceType = CompareDeviceType.P8_MAGICRF
+                    val device = UHFDevice(context)
+                    device.UhfOpen()
+                    MagicUhfReader.setPortPath(device.SerialDev())
+                    val reader = MagicUhfReader.getInstance()
+                    if (reader != null) {
+                        p8Device = device
+                        p8Reader = reader
+                        isReaderConnected = true
+                        withContext(Dispatchers.Main) {
+                            bannerStatus = CompareBannerStatus.OK
+                            bannerText = "พร้อมค้นหา (MagicRF | $deviceModel)"
+                        }
+                    }
+                } catch (t: Throwable) {
+                    withContext(Dispatchers.Main) {
+                        bannerStatus = CompareBannerStatus.ERROR
+                        bannerText = "ไม่รองรับ Hardware บนเครื่อง: $deviceModel"
+                    }
+                }
             }
         }
     }
 
-    LaunchedEffect(Unit) { load() }
+    // 4. คืนทรัพยากรตอนปิดหน้าจอ
+    DisposableEffect(lifecycleOwner) {
+        onDispose {
+            try {
+                scanningOn = false
+                if (currentDeviceType == CompareDeviceType.HC) {
+                    hcReader?.stopInventory()
+                    hcReader?.disConnect()
+                } else if (currentDeviceType == CompareDeviceType.P8_MAGICRF) {
+                    p8Reader?.close()
+                    p8Device?.UhfStop()
+                }
+            } catch (e: Exception) {}
+        }
+    }
+
+    // 5. ควบคุมการสั่งยิงคลื่น
+    LaunchedEffect(scanningOn) {
+        if (!isReaderConnected) return@LaunchedEffect
+        try {
+            if (scanningOn) {
+                if (currentDeviceType == CompareDeviceType.HC) {
+                    hcReader?.startInventory()
+                } else if (currentDeviceType == CompareDeviceType.P8_MAGICRF) {
+                    while (scanningOn) {
+                        withContext(Dispatchers.IO) {
+                            val epcList = p8Reader?.inventoryRealTime()
+                            if (epcList != null && epcList.isNotEmpty()) {
+                                for (epc in epcList) {
+                                    if (epc != null) {
+                                        val epcStr = Tools.Bytes2HexString(epc, epc.size)
+                                        scanCh.trySend(normalizeToken(epcStr))
+                                    }
+                                }
+                            }
+                            delay(80)
+                        }
+                    }
+                }
+            } else {
+                if (currentDeviceType == CompareDeviceType.HC) hcReader?.stopInventory()
+            }
+        } catch (e: Exception) {
+            scanningOn = false
+        }
+    }
+
+    // 6. Loop ดักรอข้อมูลที่สแกนเข้ามา
+    LaunchedEffect(Unit) {
+        var lastBeepMs = 0L // ย้ายมาไว้ข้างใน เพื่อให้จำค่าเวลาได้ถูกต้องโดยไม่ถูกหน้าจอดึงกลับไปเป็น 0
+
+        for (rfid in scanCh) {
+            totalScannedCount++
+
+            if (targetMap.containsKey(rfid)) {
+                val found = targetMap[rfid]!!
+
+                if (!foundProductIds.contains(found.productId)) {
+                    foundProductIds.add(found.productId)
+                }
+
+                if (isLocked) {
+                    // ถ้าระบบโฟกัส (Lock) อยู่ และเป็นสินค้าที่กำลังโฟกัส
+                    if (currentFoundItem?.productId == found.productId) {
+                        val now = System.currentTimeMillis()
+                        // ให้ส่งเสียงสั้นๆ รัวๆ แบบเรดาร์ (Geiger counter)
+                        if (now - lastBeepMs > 120) {
+                            lastBeepMs = now
+                            try { toneGen.startTone(ToneGenerator.TONE_PROP_BEEP, 50) } catch (_: Exception) {}
+                        }
+                    }
+                } else {
+                    // โหมดปกติ เปลี่ยนของไปเรื่อยๆ (ร้องเตือน 1 ครั้งยาวๆ)
+                    if (currentFoundItem?.rfid != rfid) {
+                        currentFoundItem = found
+                        val now = System.currentTimeMillis()
+                        if (now - lastBeepMs > 150) {
+                            lastBeepMs = now
+                            try { toneGen.startTone(ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD, 100) } catch (_: Exception) {}
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     Scaffold(
         topBar = {
-            CenterAlignedTopAppBar(
-                title = { Text("เทียบสต๊อก") },
-                navigationIcon = { TextButton(onClick = onBack) { Text("ย้อนกลับ") } },
-                actions = {
-                    IconButton(onClick = { if (!loading && !confirming) load() }) {
-                        Icon(MIcons.Filled.Refresh, contentDescription = "รีเฟรช")
+            TopAppBar(
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Rounded.WifiTethering,
+                            contentDescription = "Scanner",
+                            modifier = Modifier.padding(end = 8.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Text("ค้นหาสินค้าด้วย RFID", fontWeight = FontWeight.Bold)
                     }
-                }
+                },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(
+                            imageVector = Icons.Rounded.ArrowBackIosNew,
+                            contentDescription = "Back",
+                            tint = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                },
+                actions = {
+                    IconButton(onClick = { showOverviewDialog = true }) {
+                        Icon(Icons.Rounded.FormatListBulleted, contentDescription = "Overview", tint = Color(0xFF6366F1))
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    titleContentColor = MaterialTheme.colorScheme.onSurface
+                )
             )
-        },
-        bottomBar = {
-            Surface(tonalElevation = 2.dp) {
+        }
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // --- Banner แจ้งสถานะ Hardware ---
+            AnimatedVisibility(visible = bannerText != null && bannerStatus != CompareBannerStatus.NONE) {
+                val (bg, txt, icon) = when (bannerStatus) {
+                    CompareBannerStatus.OK -> Triple(Color(0xFF22C55E).copy(0.1f), Color(0xFF22C55E), Icons.Rounded.CheckCircle)
+                    CompareBannerStatus.WARN -> Triple(Color(0xFFF59E0B).copy(0.1f), Color(0xFFF59E0B), Icons.Rounded.Warning)
+                    CompareBannerStatus.ERROR -> Triple(Color(0xFFEF4444).copy(0.1f), Color(0xFFEF4444), Icons.Rounded.Error)
+                    else -> Triple(Color.Gray.copy(0.1f), Color.Gray, Icons.Rounded.Info)
+                }
                 Row(
-                    Modifier.fillMaxWidth().padding(12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 12.dp)
+                        .background(bg, RoundedCornerShape(12.dp))
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    FilterChip(
-                        selected = showOnlyDiff,
-                        onClick = { showOnlyDiff = !showOnlyDiff },
-                        label = { Text(if (showOnlyDiff) "แสดงเฉพาะที่ต่าง" else "แสดงทั้งหมด") }
+                    Icon(icon, null, tint = txt, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(bannerText ?: "", color = txt, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                }
+            }
+
+            if (isLoading) {
+                Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        CircularProgressIndicator(color = Color(0xFF6366F1))
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text("กำลังโหลดคิวค้นหา...", color = Color.Gray)
+                    }
+                }
+                return@Scaffold
+            }
+
+            // แสดงยอดภาพรวมแบบด่วน (Clean & Modern)
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = 1.dp,
+                shadowElevation = 2.dp
+            ) {
+                Row(
+                    modifier = Modifier.padding(16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Rounded.DataUsage, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(20.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("เป้าหมายค้นหาทั้งหมด", color = Color.DarkGray, fontWeight = FontWeight.Medium)
+                    }
+                    val isAllFound = foundProductIds.size == uniqueTargetsCount && uniqueTargetsCount > 0
+                    Text(
+                        text = "${foundProductIds.size} / $uniqueTargetsCount",
+                        color = if (isAllFound) Color(0xFF22C55E) else Color(0xFF6366F1),
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 18.sp
                     )
+                }
+            }
 
-                    Spacer(Modifier.weight(1f))
+            Spacer(modifier = Modifier.height(16.dp))
 
-                    Button(
-                        onClick = { if (!confirming) confirmApply() },
-                        enabled = !confirming && !loading && diffRows.isNotEmpty(),
-                        shape = RoundedCornerShape(14.dp),
-                        modifier = Modifier.height(46.dp)
-                    ) {
-                        if (confirming) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(18.dp),
-                                strokeWidth = 2.dp,
-                                color = Color.White
+            // ── UI แสดงผล ──
+            if (currentFoundItem != null) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .clickable { isLocked = !isLocked }, // ✅ กดล็อค/ปลดล็อค ด้วยการแตะที่การ์ดได้เลย
+                    colors = CardDefaults.cardColors(containerColor = if (isLocked) Color(0xFF15803D) else Color(0xFF22C55E)),
+                    shape = RoundedCornerShape(24.dp),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 6.dp)
+                ) {
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        // ปุ่มกดล็อคโฟกัส (ขยายพื้นที่กดให้ใหญ่ขึ้น)
+                        IconButton(
+                            onClick = { isLocked = !isLocked },
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(8.dp)
+                                .size(56.dp) // ✅ เพิ่มพื้นที่กด
+                        ) {
+                            Icon(
+                                if (isLocked) Icons.Rounded.Lock else Icons.Rounded.LockOpen,
+                                contentDescription = "Focus",
+                                tint = if (isLocked) Color(0xFFFBBF24) else Color.White.copy(alpha = 0.8f),
+                                modifier = Modifier.size(32.dp) // ✅ ขยายไอคอน
                             )
-                            Spacer(Modifier.width(10.dp))
-                            Text("กำลังยืนยัน...")
-                        } else {
-                            Text("ยืนยันการเทียบ", fontWeight = FontWeight.SemiBold)
+                        }
+
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(24.dp)
+                                .verticalScroll(rememberScrollState()),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Rounded.CheckCircleOutline, contentDescription = null, tint = Color.White, modifier = Modifier.size(32.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("เจอแล้ว!", fontSize = 28.sp, color = Color.White, fontWeight = FontWeight.Black)
+                            }
+
+                            if (isLocked) {
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Row(
+                                    modifier = Modifier
+                                        .background(Color.Black.copy(alpha = 0.2f), RoundedCornerShape(8.dp))
+                                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(Icons.Rounded.GpsFixed, contentDescription = null, tint = Color(0xFFFBBF24), modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("โฟกัสเป้าหมายนี้อยู่ (ยิงเจอจะดังรัวๆ)", color = Color(0xFFFBBF24), fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                                }
+                            } else {
+                                // ✅ เพิ่มข้อความแนะแนวทางว่ากดหน้าจอเพื่อล็อคได้
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Row(
+                                    modifier = Modifier
+                                        .background(Color.White.copy(alpha = 0.2f), RoundedCornerShape(8.dp))
+                                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(Icons.Rounded.TouchApp, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("แตะที่พื้นที่สีเขียวเพื่อล็อคเป้าหมาย", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(24.dp))
+
+                            // รูปภาพ Responsive ไม่ฟิกซ์ขนาดตายตัว แต่ใช้สัดส่วน
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth(0.55f) // กว้าง 55% ของหน้าจอ
+                                    .aspectRatio(1f)     // บังคับให้เป็นสี่เหลี่ยมจัตุรัส
+                                    .sizeIn(maxWidth = 200.dp, maxHeight = 200.dp) // จำกัดไม่ให้ใหญ่เกินไปบน Tablet
+                                    .clip(RoundedCornerShape(16.dp))
+                                    .background(Color.White.copy(alpha = 0.2f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (currentFoundItem!!.imageUrl != null) {
+                                    AsyncImage(
+                                        model = currentFoundItem!!.imageUrl,
+                                        contentDescription = "Product Image",
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                } else {
+                                    Icon(Icons.Rounded.ImageNotSupported, null, tint = Color.White.copy(alpha = 0.7f), modifier = Modifier.size(48.dp))
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(24.dp))
+
+                            Text(
+                                text = currentFoundItem!!.productName,
+                                fontSize = 22.sp,
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "SKU: ${currentFoundItem!!.sku}",
+                                fontSize = 16.sp,
+                                color = Color.White.copy(0.9f),
+                                fontWeight = FontWeight.Medium
+                            )
+
+                            Spacer(modifier = Modifier.height(32.dp))
+
+                            // ปุ่มลบออกจากคิว (ดีไซน์ใหม่)
+                            Button(
+                                onClick = {
+                                    if (isDeleting) return@Button
+                                    isDeleting = true
+
+                                    val targetIdToClear = currentFoundItem!!.targetId
+                                    val productIdToClear = currentFoundItem!!.productId
+
+                                    scope.launch {
+                                        val success = StockSearchApi.removeSearchTarget(context, targetIdToClear)
+                                        if (success) {
+                                            targetMap = targetMap.filterValues { it.productId != productIdToClear }
+                                            foundProductIds.remove(productIdToClear)
+                                            currentFoundItem = null
+                                            isLocked = false
+                                            Toast.makeText(context, "ลบออกจากคิวเรียบร้อย", Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            Toast.makeText(context, "ลบไม่สำเร็จ ลองใหม่อีกครั้ง", Toast.LENGTH_SHORT).show()
+                                        }
+                                        isDeleting = false
+                                    }
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color.White),
+                                shape = RoundedCornerShape(16.dp),
+                                contentPadding = PaddingValues(horizontal = 24.dp, vertical = 16.dp),
+                                modifier = Modifier.fillMaxWidth(0.9f)
+                            ) {
+                                if (isDeleting) {
+                                    CircularProgressIndicator(modifier = Modifier.size(24.dp), color = Color(0xFF22C55E), strokeWidth = 2.dp)
+                                } else {
+                                    Icon(Icons.Rounded.TaskAlt, null, tint = Color(0xFF22C55E))
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("เคลียร์สินค้า (หาเจอแล้ว)", color = Color(0xFF22C55E), fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                                }
+                            }
                         }
                     }
-                }
-            }
-        }
-    ) { pad ->
-        Column(
-            Modifier.fillMaxSize().padding(pad),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            SummaryHeader4(
-                headerBrush = headerBrush,
-                diffCount = diffCount,
-                valueDiffNet = valueDiffNet,
-                damageValue = damageValue,
-                overValue = overValue
-            )
-
-            if (bannerText != null) {
-                val (bg, fg, icon) = when (bannerState) {
-                    BannerState.OK -> Triple(
-                        MaterialTheme.colorScheme.primaryContainer,
-                        MaterialTheme.colorScheme.onPrimaryContainer,
-                        MIcons.Outlined.CheckCircle
-                    )
-                    BannerState.WARN -> Triple(
-                        MaterialTheme.colorScheme.tertiaryContainer,
-                        MaterialTheme.colorScheme.onTertiaryContainer,
-                        MIcons.Outlined.ErrorOutline
-                    )
-                    BannerState.ERROR -> Triple(
-                        MaterialTheme.colorScheme.errorContainer,
-                        MaterialTheme.colorScheme.onErrorContainer,
-                        MIcons.Outlined.ErrorOutline
-                    )
-                    else -> Triple(
-                        MaterialTheme.colorScheme.surfaceVariant,
-                        MaterialTheme.colorScheme.onSurfaceVariant,
-                        MIcons.Outlined.ErrorOutline
-                    )
-                }
-
-                Card(
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                    colors = CardDefaults.cardColors(containerColor = bg),
-                    shape = RoundedCornerShape(16.dp)
-                ) {
-                    Row(
-                        Modifier.fillMaxWidth().padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(icon, contentDescription = null, tint = fg)
-                        Spacer(Modifier.width(10.dp))
-                        Text(bannerText!!, color = fg, fontWeight = FontWeight.SemiBold)
-                    }
-                }
-            }
-
-            if (loading) {
-                Column(
-                    Modifier.fillMaxSize(),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    CircularProgressIndicator()
-                    Spacer(Modifier.height(10.dp))
-                    Text("กำลังโหลดข้อมูล...")
                 }
             } else {
-                val shown = if (showOnlyDiff) diffRows else rows
-                if (shown.isEmpty()) {
-                    Column(
-                        Modifier.fillMaxSize(),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        Text("ไม่มีรายการให้แสดง")
-                    }
-                } else {
-                    LazyColumn(
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        itemsIndexed(shown, key = { _, it -> it.productId }) { _, r ->
-                            CompareItem(r)
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/* ----------------------------- UI ----------------------------- */
-
-@Composable
-private fun SummaryHeader4(
-    headerBrush: Brush,
-    diffCount: Int,
-    valueDiffNet: Double,
-    damageValue: Double,
-    overValue: Double
-) {
-    Box(
-        Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp)
-            .background(headerBrush, RoundedCornerShape(18.dp))
-            .padding(16.dp)
-    ) {
-        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+                // 🔵 กรณี: ไม่เจอสินค้า (เรดาร์สแกน) Responsive Layout
                 Box(
-                    Modifier.size(44.dp).background(Color.White.copy(alpha = 0.18f), CircleShape),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .background(Color(0xFFF8FAFC), RoundedCornerShape(24.dp))
+                        .border(
+                            width = if (scanningOn) 2.dp else 1.dp,
+                            color = if (scanningOn) Color(0xFF6366F1).copy(alpha = 0.5f) else Color(0xFFE2E8F0),
+                            shape = RoundedCornerShape(24.dp)
+                        ),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(MIcons.Outlined.Inventory2, contentDescription = null, tint = Color.White)
-                }
-                Spacer(Modifier.width(12.dp))
-                Text(
-                    "สรุปผลต่าง",
-                    color = Color.White,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
-            }
+                    if (scanningOn) {
+                        val infiniteTransition = rememberInfiniteTransition(label = "radar")
+                        val scale by infiniteTransition.animateFloat(
+                            initialValue = 1f,
+                            targetValue = 3f,
+                            animationSpec = infiniteRepeatable(animation = tween(1500, easing = LinearOutSlowInEasing), repeatMode = RepeatMode.Restart),
+                            label = "scale"
+                        )
+                        val alpha by infiniteTransition.animateFloat(
+                            initialValue = 0.6f,
+                            targetValue = 0f,
+                            animationSpec = infiniteRepeatable(animation = tween(1500, easing = LinearOutSlowInEasing), repeatMode = RepeatMode.Restart),
+                            label = "alpha"
+                        )
 
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                SummaryChip("สินค้าที่มีผลต่าง", diffCount.toString(), Modifier.weight(1f))
-                SummaryChip("มูลค่าความต่าง", fmtSignedMoney(valueDiffNet), Modifier.weight(1f))
-            }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                SummaryChip("มูลค่าความเสียหาย", "฿${fmtMoney(damageValue)}", Modifier.weight(1f))
-                SummaryChip("มูลค่าสินค้าเกิน", "฿${fmtMoney(overValue)}", Modifier.weight(1f))
-            }
-        }
-    }
-}
+                        // วงคลื่นกระจาย
+                        Box(
+                            Modifier
+                                .fillMaxWidth(0.3f)
+                                .aspectRatio(1f)
+                                .scale(scale)
+                                .alpha(alpha)
+                                .background(Color(0xFF6366F1), CircleShape)
+                        )
+                        // วงตรงกลาง
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(0.3f)
+                                .aspectRatio(1f)
+                                .background(Color(0xFF6366F1).copy(0.15f), CircleShape)
+                                .border(2.dp, Color(0xFF6366F1), CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Rounded.WifiTethering, null, tint = Color(0xFF6366F1), modifier = Modifier.size(48.dp))
+                        }
 
-@Composable
-private fun SummaryChip(title: String, value: String, modifier: Modifier = Modifier) {
-    Surface(
-        modifier = modifier,
-        color = Color.White.copy(alpha = 0.16f),
-        shape = RoundedCornerShape(14.dp)
-    ) {
-        Column(Modifier.padding(12.dp)) {
-            Text(title, color = Color.White.copy(alpha = 0.92f), style = MaterialTheme.typography.bodySmall)
-            Spacer(Modifier.height(6.dp))
-            Text(value, color = Color.White, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
-        }
-    }
-}
-
-@Composable
-private fun ThumbImage(imageUrl: String?, size: Dp = 64.dp) {
-    Box(
-        modifier = Modifier
-            .size(size)
-            .clip(RoundedCornerShape(14.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant),
-        contentAlignment = Alignment.Center
-    ) {
-        if (imageUrl.isNullOrBlank()) {
-            Icon(MIcons.Outlined.Image, contentDescription = null)
-        } else {
-            AsyncImage(
-                model = imageUrl,
-                contentDescription = null,
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop // ✅ รูปเท่ากันทุกใบ
-            )
-        }
-    }
-}
-
-@Composable
-private fun CompareItem(r: CompareRow) {
-    val isDiff = abs(r.diff) > 0.0005
-    val badgeColor = if (isDiff) Color(0xFFFFE0B2) else Color(0xFFE8F5E9)
-    val badgeTextColor = if (isDiff) Color(0xFF8A4B00) else Color(0xFF1B5E20)
-
-    val diffQtyText = fmtSignedQty(r.diff)              // ✅ + / -
-    val diffValueText = fmtSignedMoney(r.valueDiff)     // ✅ +฿ / -฿
-
-    Card(shape = RoundedCornerShape(18.dp)) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                ThumbImage(r.imageUrl, 64.dp)
-                Spacer(Modifier.width(12.dp))
-
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        r.name,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        "ID: ${r.productId}  •  ราคาขาย ฿${fmtMoney(r.price)}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-
-                Box(
-                    Modifier
-                        .background(badgeColor, RoundedCornerShape(999.dp))
-                        .padding(horizontal = 10.dp, vertical = 6.dp)
-                ) {
-                    Text(
-                        if (isDiff) "ต่าง" else "ตรง",
-                        color = badgeTextColor,
-                        fontWeight = FontWeight.SemiBold,
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                }
-            }
-
-            Divider()
-
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Column {
-                    Text("ระบบ", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("${fmtQty(r.systemQty)} ${r.unit ?: ""}".trim(), fontWeight = FontWeight.SemiBold)
-                }
-                Column(horizontalAlignment = Alignment.End) {
-                    Text("นับได้", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("${r.countedQty} ${r.unit ?: ""}".trim(), fontWeight = FontWeight.SemiBold)
-                }
-            }
-
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Column {
-                    Text("ผลต่าง", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(diffQtyText, fontWeight = FontWeight.ExtraBold)
-                }
-                Column(horizontalAlignment = Alignment.End) {
-                    Text("มูลค่าความต่าง", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(diffValueText, fontWeight = FontWeight.ExtraBold)
-                }
-            }
-        }
-    }
-}
-
-/* ----------------------------- Helpers ----------------------------- */
-
-private fun fmtQty(v: Double): String {
-    val s = "%.3f".format(v)
-    return s.trimEnd('0').trimEnd('.')
-}
-
-private fun fmtMoney(v: Double): String = "%.2f".format(v)
-
-private fun fmtSignedQty(v: Double): String = when {
-    v > 0.0005 -> "+${fmtQty(v)}"
-    v < -0.0005 -> "-${fmtQty(abs(v))}"
-    else -> "0"
-}
-
-private fun fmtSignedMoney(v: Double): String {
-    val a = abs(v)
-    return when {
-        v > 0.005 -> "+฿${fmtMoney(a)}"
-        v < -0.005 -> "-฿${fmtMoney(a)}"
-        else -> "฿0.00"
-    }
-}
-
-/* ----------------------------- API ----------------------------- */
-
-private data class StockUpsert(val id: Long, val qty: Double, val updatedAt: String)
-
-private data class StockMovementInsert(
-    val productIdText: String,
-    val productIdBigint: Long,
-    val type: String,
-    val qty: Double,
-    val note: String,
-    val refType: String,
-    val refIdBigint: Long
-)
-
-private object SupabaseCompareApi {
-    private val client = OkHttpClient()
-    private val media = "application/json; charset=utf-8".toMediaType()
-
-    private fun bearer(accessToken: String?) =
-        accessToken?.takeIf { it.isNotBlank() } ?: SupabaseConfig.ANON_KEY
-
-    private fun enc(s: String): String = URLEncoder.encode(s, "UTF-8")
-
-    private fun jsonNumToDouble(v: Any?): Double = when (v) {
-        null -> 0.0
-        is Number -> v.toDouble()
-        is String -> v.toDoubleOrNull() ?: 0.0
-        else -> 0.0
-    }
-
-    suspend fun fetchReaderStock(accessToken: String?): List<ReaderRow> {
-        val url = "${SupabaseConfig.URL}/rest/v1/reader_stock?select=product_id,qty&order=product_id.asc"
-        val req = Request.Builder()
-            .url(url)
-            .get()
-            .addHeader("apikey", SupabaseConfig.ANON_KEY)
-            .addHeader("Authorization", "Bearer ${bearer(accessToken)}")
-            .addHeader("Accept", "application/json")
-            .build()
-
-        val (ok, code, raw) = withContext(Dispatchers.IO) {
-            client.newCall(req).execute().use { res ->
-                Triple(res.isSuccessful, res.code, res.body?.string().orEmpty())
-            }
-        }
-        if (!ok) throw IllegalStateException("fetch reader_stock failed ($code): $raw")
-
-        val arr = JSONArray(raw)
-        val out = ArrayList<ReaderRow>(arr.length())
-        for (i in 0 until arr.length()) {
-            val o = arr.getJSONObject(i)
-            val pid = o.optLong("product_id", -1L)
-            val qty = o.optLong("qty", 0L)
-            if (pid > 0) out.add(ReaderRow(pid, qty))
-        }
-        return out
-    }
-
-    suspend fun fetchSystemStock(accessToken: String?): List<StockRow> {
-        val url = "${SupabaseConfig.URL}/rest/v1/stock?select=id,qty&order=id.asc"
-        val req = Request.Builder()
-            .url(url)
-            .get()
-            .addHeader("apikey", SupabaseConfig.ANON_KEY)
-            .addHeader("Authorization", "Bearer ${bearer(accessToken)}")
-            .addHeader("Accept", "application/json")
-            .build()
-
-        val (ok, code, raw) = withContext(Dispatchers.IO) {
-            client.newCall(req).execute().use { res ->
-                Triple(res.isSuccessful, res.code, res.body?.string().orEmpty())
-            }
-        }
-        if (!ok) throw IllegalStateException("fetch stock failed ($code): $raw")
-
-        val arr = JSONArray(raw)
-        val out = ArrayList<StockRow>(arr.length())
-        for (i in 0 until arr.length()) {
-            val o = arr.getJSONObject(i)
-            val pid = o.optLong("id", -1L)
-            val qty = jsonNumToDouble(o.opt("qty"))
-            if (pid > 0) out.add(StockRow(pid, qty))
-        }
-        return out
-    }
-
-    // ✅ เผื่อชื่อคอลัมน์ราคาขายไม่ตรงกัน: จะลอง price ก่อน แล้วค่อยลองชื่ออื่น
-    private val priceFields = listOf("price", "sell_price", "sale_price", "selling_price", "retail_price")
-
-    suspend fun fetchProductsByIds(ids: List<Long>, accessToken: String?): List<CompareProductRow> {
-        if (ids.isEmpty()) return emptyList()
-        val chunks = ids.distinct().chunked(120)
-        val out = ArrayList<CompareProductRow>()
-
-        var lastErr: String? = null
-        for (priceField in priceFields) {
-            try {
-                out.clear()
-                for (chunk in chunks) {
-                    val inList = chunk.joinToString(",") { it.toString() }
-                    val filter = "in.($inList)"
-                    val url =
-                        "${SupabaseConfig.URL}/rest/v1/products" +
-                                "?select=id,name,unit,image_url,$priceField" +
-                                "&id=${enc(filter)}"
-
-                    val req = Request.Builder()
-                        .url(url)
-                        .get()
-                        .addHeader("apikey", SupabaseConfig.ANON_KEY)
-                        .addHeader("Authorization", "Bearer ${bearer(accessToken)}")
-                        .addHeader("Accept", "application/json")
-                        .build()
-
-                    val (ok, code, raw) = withContext(Dispatchers.IO) {
-                        client.newCall(req).execute().use { res ->
-                            Triple(res.isSuccessful, res.code, res.body?.string().orEmpty())
+                        Column(
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(bottom = 32.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text("กำลังกวาดคลื่นค้นหา...", color = Color(0xFF6366F1), fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        }
+                    } else {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(Icons.Rounded.SensorsOff, null, tint = Color(0xFFCBD5E1), modifier = Modifier.size(72.dp))
+                            Spacer(Modifier.height(16.dp))
+                            Text("กดปุ่มด้านล่างเพื่อเริ่มค้นหา", color = Color(0xFF94A3B8), fontWeight = FontWeight.Medium, fontSize = 16.sp)
                         }
                     }
-                    if (!ok) throw IllegalStateException("fetch products failed ($code): $raw")
+                }
+            }
 
-                    val arr = JSONArray(raw)
-                    for (i in 0 until arr.length()) {
-                        val o = arr.getJSONObject(i)
-                        val id = o.optLong("id", -1L)
-                        val name = o.optString("name", "สินค้า #$id")
-                        val unit = o.optString("unit", null)
-                        val img = o.optString("image_url", null)
-                        val price = jsonNumToDouble(o.opt(priceField))
-                        if (id > 0) out.add(CompareProductRow(id, name, unit, img, price))
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // แถบ Live Status Bar แสดงจำนวน Tag รวม
+            AnimatedVisibility(visible = scanningOn) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 12.dp)
+                        .background(Color(0xFFF1F5F9), RoundedCornerShape(12.dp))
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val infiniteTransition = rememberInfiniteTransition(label = "dot")
+                    val alpha by infiniteTransition.animateFloat(
+                        initialValue = 1f,
+                        targetValue = 0.2f,
+                        animationSpec = infiniteRepeatable(tween(600), RepeatMode.Reverse),
+                        label = "dotAlpha"
+                    )
+                    Box(Modifier.size(8.dp).alpha(alpha).background(Color(0xFFEF4444), CircleShape))
+
+                    Spacer(Modifier.width(12.dp))
+                    Text("กำลังสแกน... ปะทะคลื่นไปแล้ว: ", color = Color.Gray, fontSize = 13.sp)
+                    Text("$totalScannedCount Tag", color = Color.DarkGray, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                }
+            }
+
+            // ปุ่มเริ่ม/หยุดสแกน
+            Button(
+                onClick = {
+                    if (!isReaderConnected) {
+                        Toast.makeText(context, "Hardware ยังไม่พร้อมใช้งาน", Toast.LENGTH_SHORT).show()
+                    } else {
+                        scanningOn = !scanningOn
+                        if (!scanningOn) {
+                            // ✅ ตอนกด "หยุดค้นหา" เราจะไม่เคลียร์ค่า currentFoundItem และ isLocked แล้ว
+                            // เพื่อให้หน้าจอยังคงแสดงสินค้าล่าสุด หรือสินค้าที่ล็อคไว้ค้างอยู่
+                        } else {
+                            totalScannedCount = 0
+                            // ✅ ตอน "เริ่มกวาดสัญญาณใหม่" จะเคลียร์หน้าจอก็ต่อเมื่อ ไม่ได้กดล็อคแม่กุญแจไว้เท่านั้น
+                            if (!isLocked) {
+                                currentFoundItem = null
+                            }
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxWidth().height(64.dp),
+                shape = RoundedCornerShape(16.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (!isReaderConnected) Color(0xFFE2E8F0) else if (scanningOn) Color(0xFFEF4444) else Color(0xFF6366F1),
+                    contentColor = if (!isReaderConnected) Color.Gray else Color.White
+                ),
+            ) {
+                Icon(if (scanningOn) Icons.Rounded.StopCircle else Icons.Rounded.WifiTethering, null, modifier = Modifier.size(24.dp))
+                Spacer(Modifier.width(12.dp))
+                Text(if (scanningOn) "หยุดค้นหา" else "เริ่มกวาดสัญญาณ (Scan)", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+
+        // Dialog แสดงภาพรวมเฉพาะคิวที่สแกนเจอแล้ว + โชว์รูปภาพสินค้า
+        if (showOverviewDialog) {
+            AlertDialog(
+                onDismissRequest = { showOverviewDialog = false },
+                containerColor = MaterialTheme.colorScheme.surface,
+                shape = RoundedCornerShape(20.dp),
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Rounded.FactCheck, contentDescription = null, tint = Color(0xFF6366F1))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("สินค้าที่พบแล้ว (${foundProductIds.size} / $uniqueTargetsCount)", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                    }
+                },
+                text = {
+                    val foundItems = targetMap.values.distinctBy { it.productId }.filter { foundProductIds.contains(it.productId) }
+
+                    if (foundItems.isEmpty()) {
+                        Column(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Icon(Icons.Rounded.SearchOff, contentDescription = null, tint = Color.LightGray, modifier = Modifier.size(48.dp))
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text("ยังไม่พบสินค้าที่ตรงเป้าหมาย", color = Color.Gray)
+                        }
+                    } else {
+                        LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 400.dp)) {
+                            items(foundItems) { item ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    // กล่องรูปภาพใน List
+                                    Box(
+                                        modifier = Modifier
+                                            .size(56.dp)
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .background(Color(0xFFF1F5F9)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        if (item.imageUrl != null) {
+                                            AsyncImage(
+                                                model = item.imageUrl,
+                                                contentDescription = null,
+                                                contentScale = ContentScale.Crop,
+                                                modifier = Modifier.fillMaxSize()
+                                            )
+                                        } else {
+                                            Icon(Icons.Rounded.Image, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(24.dp))
+                                        }
+                                    }
+
+                                    Spacer(modifier = Modifier.width(12.dp))
+
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(item.productName, fontWeight = FontWeight.SemiBold, color = Color.DarkGray, fontSize = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                        Text("SKU: ${item.sku}", color = Color.Gray, fontSize = 12.sp)
+                                    }
+
+                                    Spacer(modifier = Modifier.width(8.dp))
+
+                                    Icon(
+                                        Icons.Rounded.CheckCircle,
+                                        contentDescription = null,
+                                        tint = Color(0xFF22C55E),
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                }
+                                HorizontalDivider(color = Color.LightGray.copy(alpha = 0.3f))
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showOverviewDialog = false }) {
+                        Text("ปิด", fontWeight = FontWeight.Bold, color = Color(0xFF6366F1), fontSize = 16.sp)
                     }
                 }
-                return out.toList()
-            } catch (e: Exception) {
-                lastErr = e.message
-            }
-        }
-
-        throw IllegalStateException(
-            "อ่านราคาขายจาก products ไม่สำเร็จ (ลองแล้ว: ${priceFields.joinToString(", ")})\n$lastErr"
-        )
-    }
-
-    suspend fun resetAllStockToZero(nowIso: String, accessToken: String?) {
-        val body = JSONObject()
-            .put("qty", 0)
-            .put("updated_at", nowIso)
-            .toString()
-            .toRequestBody(media)
-
-        val url = "${SupabaseConfig.URL}/rest/v1/stock?id=gt.0"
-        val req = Request.Builder()
-            .url(url)
-            .patch(body)
-            .addHeader("apikey", SupabaseConfig.ANON_KEY)
-            .addHeader("Authorization", "Bearer ${bearer(accessToken)}")
-            .addHeader("Content-Type", "application/json")
-            .addHeader("Prefer", "return=minimal")
-            .build()
-
-        val (ok, code, raw) = withContext(Dispatchers.IO) {
-            client.newCall(req).execute().use { res ->
-                Triple(res.isSuccessful, res.code, res.body?.string().orEmpty())
-            }
-        }
-        if (!ok) throw IllegalStateException("reset stock failed ($code): $raw")
-    }
-
-    suspend fun upsertStock(items: List<StockUpsert>, accessToken: String?) {
-        if (items.isEmpty()) return
-
-        val arr = JSONArray()
-        for (it in items) {
-            arr.put(
-                JSONObject()
-                    .put("id", it.id)
-                    .put("qty", it.qty)
-                    .put("updated_at", it.updatedAt)
             )
         }
-
-        val body = arr.toString().toRequestBody(media)
-        val url = "${SupabaseConfig.URL}/rest/v1/stock?on_conflict=id"
-
-        val req = Request.Builder()
-            .url(url)
-            .post(body)
-            .addHeader("apikey", SupabaseConfig.ANON_KEY)
-            .addHeader("Authorization", "Bearer ${bearer(accessToken)}")
-            .addHeader("Content-Type", "application/json")
-            .addHeader("Prefer", "resolution=merge-duplicates,return=minimal")
-            .build()
-
-        val (ok, code, raw) = withContext(Dispatchers.IO) {
-            client.newCall(req).execute().use { res ->
-                Triple(res.isSuccessful, res.code, res.body?.string().orEmpty())
-            }
-        }
-        if (!ok) throw IllegalStateException("upsert stock failed ($code): $raw")
-    }
-
-    suspend fun insertMovements(items: List<StockMovementInsert>, accessToken: String?) {
-        if (items.isEmpty()) return
-
-        val arr = JSONArray()
-        for (m in items) {
-            arr.put(
-                JSONObject()
-                    .put("product_id", m.productIdText)
-                    .put("product_id_bigint", m.productIdBigint)
-                    .put("type", m.type)
-                    .put("qty", m.qty)
-                    .put("note", m.note)
-                    .put("ref_type", m.refType)
-                    .put("ref_id_bigint", m.refIdBigint)
-            )
-        }
-
-        val body = arr.toString().toRequestBody(media)
-        val url = "${SupabaseConfig.URL}/rest/v1/stock_movements"
-
-        val req = Request.Builder()
-            .url(url)
-            .post(body)
-            .addHeader("apikey", SupabaseConfig.ANON_KEY)
-            .addHeader("Authorization", "Bearer ${bearer(accessToken)}")
-            .addHeader("Content-Type", "application/json")
-            .addHeader("Prefer", "return=minimal")
-            .build()
-
-        val (ok, code, raw) = withContext(Dispatchers.IO) {
-            client.newCall(req).execute().use { res ->
-                Triple(res.isSuccessful, res.code, res.body?.string().orEmpty())
-            }
-        }
-        if (!ok) throw IllegalStateException("insert movements failed ($code): $raw")
-    }
-
-    suspend fun clearReaderStock(accessToken: String?) {
-        val url = "${SupabaseConfig.URL}/rest/v1/reader_stock?product_id=gt.0"
-        val req = Request.Builder()
-            .url(url)
-            .delete()
-            .addHeader("apikey", SupabaseConfig.ANON_KEY)
-            .addHeader("Authorization", "Bearer ${bearer(accessToken)}")
-            .addHeader("Prefer", "return=minimal")
-            .build()
-
-        val (ok, code, raw) = withContext(Dispatchers.IO) {
-            client.newCall(req).execute().use { res ->
-                Triple(res.isSuccessful, res.code, res.body?.string().orEmpty())
-            }
-        }
-        if (!ok) throw IllegalStateException("clear reader_stock failed ($code): $raw")
     }
 }

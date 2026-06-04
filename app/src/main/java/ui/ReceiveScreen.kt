@@ -478,7 +478,8 @@ fun ReceiveScreen(
                             saving = saving,
                             isLotItem = r.lotItemId != null,
                             onQtyChange = { newVal ->
-                                if (newVal >= 1) rows[idx] = r.copy(qty = newVal, stockAfter = null)
+                                if (newVal <= 0) rows.removeAt(idx)
+                                else rows[idx] = r.copy(qty = newVal, stockAfter = null)
                             },
                             onDelete = { rows.removeAt(idx) }
                         )
@@ -582,11 +583,11 @@ fun QuantityInputDialog(
                     horizontalArrangement = Arrangement.Center,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    // ปุ่มลบ (-)
+                    // ปุ่มลบ (-) — กดได้ถึงติดลบ เพื่อหักยอด
                     IconButton(
                         onClick = {
                             val current = quantityInput.toIntOrNull() ?: 1
-                            if (current > 1) quantityInput = (current - 1).toString()
+                            quantityInput = (current - 1).toString()
                         },
                         modifier = Modifier.background(MaterialTheme.colorScheme.secondaryContainer, RoundedCornerShape(12.dp))
                     ) {
@@ -595,22 +596,24 @@ fun QuantityInputDialog(
 
                     Spacer(modifier = Modifier.width(16.dp))
 
-                    // ช่องพิมพ์ตัวเลข
+                    // ช่องพิมพ์ตัวเลข (รองรับค่าติดลบ)
                     OutlinedTextField(
                         value = quantityInput,
-                        onValueChange = {
-                            // ยอมให้ว่างเปล่าได้ตอนกำลังลบตัวเลขพิมพ์ใหม่ แต่ต้องเป็นตัวเลขเท่านั้น
-                            if (it.isEmpty() || it.all { char -> char.isDigit() }) quantityInput = it
+                        onValueChange = { input ->
+                            val valid = input.isEmpty() || input == "-" ||
+                                input.toIntOrNull() != null
+                            if (valid) quantityInput = input
                         },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
                         keyboardActions = KeyboardActions(
                             onDone = {
-                                val qty = quantityInput.toIntOrNull() ?: 1
-                                if (qty > 0) onConfirm(qty)
+                                val qty = quantityInput.toIntOrNull() ?: 0
+                                if (qty != 0) onConfirm(qty)
                             }
                         ),
                         singleLine = true,
-                        textStyle = TextStyle(textAlign = TextAlign.Center, fontSize = 20.sp, fontWeight = FontWeight.Bold),
+                        textStyle = TextStyle(textAlign = TextAlign.Center, fontSize = 20.sp, fontWeight = FontWeight.Bold,
+                            color = if ((quantityInput.toIntOrNull() ?: 0) < 0) Color(0xFFC62828) else Color.Unspecified),
                         modifier = Modifier.width(80.dp)
                     )
 
@@ -630,14 +633,15 @@ fun QuantityInputDialog(
             }
         },
         confirmButton = {
+            val qty = quantityInput.toIntOrNull() ?: 0
             Button(
-                onClick = {
-                    val qty = quantityInput.toIntOrNull() ?: 1
-                    if (qty > 0) onConfirm(qty)
-                },
-                modifier = Modifier.fillMaxWidth()
+                onClick = { if (qty != 0) onConfirm(qty) },
+                enabled = qty != 0,
+                modifier = Modifier.fillMaxWidth(),
+                colors = if (qty < 0) ButtonDefaults.buttonColors(containerColor = Color(0xFFC62828))
+                         else ButtonDefaults.buttonColors()
             ) {
-                Text("เพิ่มเข้าลิสต์", fontWeight = FontWeight.Bold)
+                Text(if (qty < 0) "หักยอด $qty ชิ้น" else "เพิ่มเข้าลิสต์", fontWeight = FontWeight.Bold)
             }
         },
         dismissButton = {

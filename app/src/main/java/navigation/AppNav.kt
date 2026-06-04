@@ -1,5 +1,5 @@
 package navigation
-import androidx.compose.material.icons.filled.Logout
+
 import android.app.Activity
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
@@ -15,6 +15,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Inventory2
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Logout
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -35,8 +36,6 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
-import ui.Other1Screen
-import ui.Other2Screen
 import data.AppError
 import data.AuthManager
 import data.ProductSyncManager
@@ -44,17 +43,21 @@ import data.SessionEventBus
 import data.SessionStore
 import data.SupabaseAuthApi
 import kotlinx.coroutines.launch
+
+// ✅ Import หน้าต่างๆ (เปลี่ยน CompareStockScreenV2 เป็น CompareScreen)
 import ui.CheckRfidScreen
-import ui.CompareStockScreenV2
+import ui.CompareScreen
+import ui.LotCheckScreen
+import ui.LotMenuScreen
+import ui.LotSelectScreen
 import ui.MoreArrangeScreen
 import ui.MoreDamageScreen
 import ui.MoreInitialCountScreen
 import ui.MoreIssuesScreen
 import ui.MoreTransferScreen
 import ui.MoreUpdateSystemScreen
-import ui.LotCheckScreen
-import ui.LotMenuScreen
-import ui.LotSelectScreen
+import ui.Other1Screen
+import ui.Other2Screen
 import ui.ReceiveScreen
 import ui.StockCountScreen
 
@@ -242,8 +245,10 @@ fun AppNav() {
         composable(Routes.CHECK_RFID) { CheckRfidScreen(onBack = { safeBack() }) }
         composable(Routes.STOCK_COUNT) { StockCountScreen(onBack = { safeBack() }) }
 
-        // ถ้าหน้าคุณเป็น CompareScreen wrapper อยู่แล้วก็ใช้แบบนี้
-        composable(Routes.COMPARE) { CompareScreen(onBack = { safeBack() }) }
+        // ✅ เรียกใช้ CompareScreen ตัวจริงที่เราสร้างไปใน ui/CompareScreen.kt
+        composable(Routes.COMPARE) {
+            CompareScreen(onBack = { safeBack() }) // 💡 ส่ง safeBack() ตัวเซฟที่เราเขียนดักไว้เข้าไปด้วย
+        }
 
         composable(Routes.OTHER1) { Other1Screen(onBack = { safeBack() }) }
         composable(Routes.OTHER2) {
@@ -261,11 +266,6 @@ fun AppNav() {
         composable(Routes.MORE_ISSUES) { MoreIssuesScreen(onBack = { safeBack() }) }
         composable(Routes.MORE_UPDATE_SYSTEM) { MoreUpdateSystemScreen(onBack = { safeBack() }) }
     }
-}
-
-@Composable
-fun CompareScreen(onBack: () -> Boolean) {
-    CompareStockScreenV2(onBack = { onBack() })
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -466,8 +466,8 @@ private fun MenuScreen(
         MenuData("รับสินค้า", Icons.Outlined.Input, Routes.LOT_SELECT, Color(0xFF4CAF50)),
         MenuData("เช็ค RFID", Icons.Outlined.QrCodeScanner, Routes.CHECK_RFID, Color(0xFF2196F3)),
         MenuData("นับสต็อก", Icons.Outlined.Inventory, Routes.STOCK_COUNT, Color(0xFFFF9800)),
-        MenuData("เปรียบเทียบ", Icons.Outlined.CompareArrows, Routes.COMPARE, Color(0xFF9C27B0)),
-        MenuData("เมนูอื่นๆ 1", Icons.Outlined.MoreHoriz, Routes.OTHER1, Color(0xFF607D8B)),
+        MenuData("ค้นหาสินค้า", Icons.Outlined.CompareArrows, Routes.COMPARE, Color(0xFF9C27B0)),
+        MenuData("ตรวจสอบtag", Icons.Outlined.MoreHoriz, Routes.OTHER1, Color(0xFF607D8B)),
         MenuData("ตั้งค่า", Icons.Outlined.Settings, Routes.OTHER2, Color(0xFF795548))
     )
 
@@ -564,7 +564,7 @@ private fun MenuScreen(
                         }
                     }
                 }
-            } // จบ Box Header (แก้ปีกกาหายตรงนี้)
+            } // จบ Box Header
 
             Text(
                 "เลือกรายการทำงาน",

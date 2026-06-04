@@ -9,8 +9,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
@@ -21,7 +20,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import navigation.Routes
 
-// ✅ เพิ่ม isEnabled เข้าไปเพื่อใช้เช็คสถานะการเปิด/ปิดเมนู
+// กลับมาใช้ route แบบปกติ ไม่ต้องมี Action ซับซ้อนแล้ว
 private data class MoreMenuItem(
     val title: String,
     val subtitle: String,
@@ -43,7 +42,7 @@ fun Other2Screen(
                 subtitle = "ย้ายสต๊อกระหว่างคลัง/สาขา",
                 route = Routes.MORE_TRANSFER,
                 icon = Icons.Outlined.SwapHoriz,
-                isEnabled = false
+                isEnabled = true
             ),
             MoreMenuItem(
                 title = "จัดเรียงสินค้า",
@@ -57,7 +56,7 @@ fun Other2Screen(
                 subtitle = "เริ่มต้นยอดนับครั้งแรกสำหรับระบบ",
                 route = Routes.MORE_INITIAL_COUNT,
                 icon = Icons.Outlined.Inventory2,
-                isEnabled = true // ✅ เปิดให้กดได้แค่อันนี้อันเดียวครับนาย
+                isEnabled = true
             ),
             MoreMenuItem(
                 title = "สินค้าเสียหาย",
@@ -73,70 +72,41 @@ fun Other2Screen(
                 icon = Icons.Outlined.SupportAgent,
                 isEnabled = false
             ),
+            // ✅ เปลี่ยนไอคอนและข้อความ และสั่งให้วิ่งไปหน้า MORE_UPDATE_SYSTEM
             MoreMenuItem(
-                title = "อัพเดตระบบ",
-                subtitle = "ตรวจสอบเวอร์ชันและอัปเดต",
+                title = "ซิงค์ข้อมูล (อัพเดตระบบ)",
+                subtitle = "ตรวจสอบและดึงฐานข้อมูลสินค้าล่าสุด",
                 route = Routes.MORE_UPDATE_SYSTEM,
-                icon = Icons.Outlined.SystemUpdateAlt,
-                isEnabled = false
+                icon = Icons.Outlined.CloudSync,
+                isEnabled = true
             )
         )
     }
 
-    val pageBg = remember {
-        Brush.verticalGradient(
-            colors = listOf(Color(0xFFF8FAFF), Color(0xFFF5F5F5))
-        )
-    }
-
-    val headerBg = remember {
-        Brush.horizontalGradient(
-            colors = listOf(Color(0xFF5B86E5), Color(0xFF36D1DC))
-        )
-    }
+    val pageBg = remember { Brush.verticalGradient(colors = listOf(Color(0xFFF8FAFF), Color(0xFFF5F5F5))) }
+    val headerBg = remember { Brush.horizontalGradient(colors = listOf(Color(0xFF5B86E5), Color(0xFF36D1DC))) }
 
     Scaffold(
         topBar = {
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .background(headerBg)
-                    .statusBarsPadding()
-            ) {
+            Box(Modifier.fillMaxWidth().background(headerBg).statusBarsPadding()) {
                 CenterAlignedTopAppBar(
-                    title = {
-                        Text(
-                            "เมนูผู้ดูแล",
-                            fontWeight = FontWeight.ExtraBold,
-                            color = Color.White
-                        )
-                    },
+                    title = { Text("เมนูผู้ดูแล", fontWeight = FontWeight.ExtraBold, color = Color.White) },
                     navigationIcon = {
                         IconButton(onClick = { onBack() }) {
-                            Icon(
-                                Icons.AutoMirrored.Filled.ArrowBack,
-                                contentDescription = "Back",
-                                tint = Color.White
-                            )
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
                         }
                     },
                     colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
-                        containerColor = Color.Transparent,
-                        titleContentColor = Color.White
+                        containerColor = Color.Transparent, titleContentColor = Color.White
                     )
                 )
             }
         }
     ) { pad ->
         LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(pageBg)
-                .padding(pad)
-                .padding(horizontal = 16.dp, vertical = 16.dp),
+            modifier = Modifier.fillMaxSize().background(pageBg).padding(pad).padding(horizontal = 16.dp, vertical = 16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-
             item {
                 Text(
                     text = "งานจัดการสต๊อก",
@@ -152,11 +122,15 @@ fun Other2Screen(
                     title = item.title,
                     subtitle = item.subtitle,
                     icon = item.icon,
-                    isEnabled = item.isEnabled, // ✅ ส่งสถานะไปที่ Card
-                    onClick = { if (item.isEnabled) onGo(item.route) } // ✅ เช็คก่อนให้กดเปลี่ยนหน้า
+                    isEnabled = item.isEnabled,
+                    onClick = {
+                        if (item.isEnabled) {
+                            // โยน route ไปให้ Navigation จัดการพาไปหน้า Git Pull เลย!
+                            onGo(item.route)
+                        }
+                    }
                 )
             }
-
             item { Spacer(Modifier.height(4.dp)) }
         }
     }
@@ -168,27 +142,23 @@ private fun AdminMenuCard(
     title: String,
     subtitle: String,
     icon: ImageVector,
-    isEnabled: Boolean, // ✅ รับค่าสถานะ
+    isEnabled: Boolean,
     onClick: () -> Unit
 ) {
-    // ปรับสีพื้นหลังเงาตามสถานะเปิด/ปิด
     val containerColor = if (isEnabled) Color.White else Color(0xFFF0F0F0)
 
     Card(
         onClick = { if (isEnabled) onClick() },
-        enabled = isEnabled, // ปิดเอฟเฟกต์การกดถ้ายังไม่เปิดใช้
+        enabled = isEnabled,
         shape = RoundedCornerShape(18.dp),
         colors = CardDefaults.cardColors(containerColor = containerColor),
         elevation = CardDefaults.cardElevation(defaultElevation = if (isEnabled) 2.dp else 0.dp),
         modifier = Modifier.fillMaxWidth()
     ) {
         Row(
-            Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 14.dp),
+            Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // ไอคอนในกรอบ
             Box(
                 modifier = Modifier
                     .size(44.dp)
@@ -219,7 +189,6 @@ private fun AdminMenuCard(
                         overflow = TextOverflow.Ellipsis
                     )
 
-                    // ✅ แสดงป้าย "เร็วๆ นี้" ถ้าปุ่มยังล็อคอยู่
                     if (!isEnabled) {
                         Spacer(Modifier.width(8.dp))
                         Surface(
@@ -246,7 +215,6 @@ private fun AdminMenuCard(
                 )
             }
 
-            // ✅ เปลี่ยนไอคอนด้านหลังเป็นแม่กุญแจถ้าปุ่มล็อค
             Icon(
                 if (isEnabled) Icons.Outlined.ChevronRight else Icons.Outlined.Lock,
                 contentDescription = null,

@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./gradlew compileDebugKotlin)",
+      "Bash(./gradlew compileDebugKotlin --no-daemon)",
+      "Bash(gradlew.bat compileDebugKotlin)",
+      "Bash(cmd.exe /c \"gradlew.bat compileDebugKotlin\")",
+      "Bash(cmd.exe /c \"gradlew.bat compileDebugKotlin 2>&1\")",
+      "PowerShell($env:JAVA_OPTS=\"-Djava.net.preferIPv4Stack=true\"; Set-Location \"D:\\\\app_rfid\\\\PDA_RFID\"; .\\\\gradlew.bat compileDebugKotlin --no-daemon 2>&1 | Select-Object -Last 80)",
+      "PowerShell($env:GRADLE_OPTS=\"-Djava.net.preferIPv4Stack=true -Dfile.encoding=UTF-8\"; Set-Location \"D:\\\\app_rfid\\\\PDA_RFID\"; .\\\\gradlew.bat compileDebugKotlin --no-daemon --info 2>&1 | Where-Object { $_ -match \"error:|warning:|BUILD\" } | Select-Object -Last 40)",
+      "Bash(gh pr *)",
+      "PowerShell(Get-Command gh -ErrorAction SilentlyContinue)",
+      "PowerShell(Get-Item \"C:\\\\Program Files\\\\GitHub CLI\\\\gh.exe\" -ErrorAction SilentlyContinue; Get-Item \"$env:LOCALAPPDATA\\\\Programs\\\\GitHub CLI\\\\gh.exe\" -ErrorAction SilentlyContinue; Get-Item \"C:\\\\Users\\\\Por Woodden\\\\AppData\\\\Local\\\\Programs\\\\GitHub CLI\\\\gh.exe\" -ErrorAction SilentlyContinue)",
+      "Bash(python3 -c \"import sys,json; lines=sys.stdin.read\\(\\).strip\\(\\).split\\('\\\\n'\\); [print\\(json.loads\\(l\\).get\\('content',''\\)[:2000] if isinstance\\(json.loads\\(l\\).get\\('content',''\\),str\\) else ''\\) for l in lines[-5:] if l]\")",
+      "Bash(python3 -c ' *)",
+      "Bash(./gradlew :app:compileDebugKotlin)",
+      "Bash(./gradlew :app:compileDebugKotlin --no-daemon)",
+      "Bash(find \"D:\\\\app_rfid\\\\PDA_RFID\\\\app\\\\src\\\\main\\\\java\" -name \"*.kt\" -exec wc -l {} +)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(where gh *)",
+      "Bash(gradlew.bat :app:compileDebugKotlin)",
+      "Bash(cmd.exe /c \"gradlew.bat :app:compileDebugKotlin 2>&1\")"
+    ]
+  }
+}

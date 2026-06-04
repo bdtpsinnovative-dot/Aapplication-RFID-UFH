@@ -107,4 +107,25 @@ class ProductDatabase(ctx: Context) : SQLiteOpenHelper(ctx, "products_cache.db",
     fun lastSyncMs(): Long = readableDatabase
         .rawQuery("SELECT MAX(synced_at) FROM products", null)
         .use { if (it.moveToFirst()) it.getLong(0) else 0L }
+    // เพิ่มฟังก์ชันนี้เข้าไปสำหรับใช้กู้ข้อมูลตระกร้า DRAFT โดยเฉพาะ
+    fun findById(id: Long): ProductCache? {
+        return readableDatabase.rawQuery(
+            "SELECT * FROM products WHERE id=? LIMIT 1",
+            arrayOf(id.toString())
+        ).use { cur ->
+            if (!cur.moveToFirst()) return null
+            ProductCache(
+                id = cur.getLong(cur.getColumnIndexOrThrow("id")),
+                name = cur.getString(cur.getColumnIndexOrThrow("name")) ?: "",
+                sku = cur.getString(cur.getColumnIndexOrThrow("sku")),
+                barcode = cur.getString(cur.getColumnIndexOrThrow("barcode")),
+                price = cur.getDouble(cur.getColumnIndexOrThrow("price")),
+                unit = cur.getString(cur.getColumnIndexOrThrow("unit")),
+                imageUrl = cur.getString(cur.getColumnIndexOrThrow("image_url")),
+                status = cur.getString(cur.getColumnIndexOrThrow("status")),
+                color = cur.getString(cur.getColumnIndexOrThrow("color")),
+                weight = cur.getDouble(cur.getColumnIndexOrThrow("weight"))
+            )
+        }
+    }
 }

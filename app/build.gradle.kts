@@ -41,13 +41,16 @@ android {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
-    kotlinOptions { jvmTarget = "11" }
+
+    kotlinOptions {
+        jvmTarget = "11"
+    }
 
     buildFeatures {
         compose = true
         buildConfig = true // เปิดเพื่อให้เรียกใช้คีย์ลับได้
     }
-} // <--- ปีกกาตัวนี้แหละครับที่หายไป!
+} // ปีกกาปิดบล็อก android ครบถ้วนตรงนี้
 
 dependencies {
     // AndroidX & Compose (ใช้จาก libs.versions.toml)
@@ -74,18 +77,25 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.json:json:20240303")
 
-    // Camera & Barcode (เลือกเวอร์ชันล่าสุดตัวเดียวพอครับ)
+    // Camera & Barcode
     val cameraVersion = "1.5.2"
     implementation("androidx.camera:camera-camera2:$cameraVersion")
     implementation("androidx.camera:camera-lifecycle:$cameraVersion")
     implementation("androidx.camera:camera-view:$cameraVersion")
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
 
-    // โหลดไฟล์ .aar/.jar จาก libs (เผื่อไว้ให้ SDK จีน)
-    // โหลดไฟล์ .aar ปกติ
-    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar"))))
+    // Animation
+    implementation("androidx.compose.animation:animation")
+    implementation("androidx.compose.animation:animation-core")
 
-    // 💡 บังคับให้โหลด UHFDevice.jar แบบพิเศษ (compileOnly)
+    // === เพิ่ม Room Database ตรงนี้เพื่อแก้ปัญหา Unresolved reference 'room' ===
+    val roomVersion = "2.6.1"
+    implementation("androidx.room:room-runtime:$roomVersion")
+    implementation("androidx.room:room-ktx:$roomVersion")
+    annotationProcessor("androidx.room:room-compiler:$roomVersion")
+
+    // โหลดไฟล์ .aar/.jar จาก libs (สำหรับ SDK เครื่องอ่าน RFID จีน)
+    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar"))))
     compileOnly(files("libs/UHFDevice.jar"))
 
     // Testing
