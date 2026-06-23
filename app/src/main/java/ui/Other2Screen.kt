@@ -63,7 +63,7 @@ fun Other2Screen(
                 subtitle = "บันทึกของเสีย/แตก/หมดอายุ",
                 route = Routes.MORE_DAMAGE,
                 icon = Icons.Outlined.ReportProblem,
-                isEnabled = false
+                isEnabled = true
             ),
             MoreMenuItem(
                 title = "รายการปัญหา",

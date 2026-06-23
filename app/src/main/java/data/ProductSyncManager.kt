@@ -15,7 +15,7 @@ object ProductSyncManager {
     suspend fun syncAll(
         ctx: Context,
         accessToken: String?,
-        onProgress: (done: Int, total: Int) -> Unit = { _, _ -> }
+        onProgress: (done: Int, toฟtal: Int) -> Unit = { _, _ -> }
     ) = withContext(Dispatchers.IO) {
         val db = ProductDatabase(ctx)
         val bearer = accessToken?.takeIf { it.isNotBlank() } ?: SupabaseConfig.ANON_KEY
