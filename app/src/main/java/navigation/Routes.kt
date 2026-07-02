@@ -17,6 +17,7 @@ object Routes {
     const val MORE_DAMAGE = "more_damage"
     const val MORE_ISSUES = "more_issues"
     const val MORE_UPDATE_SYSTEM = "more_update_system"
+    const val MORE_RFID_MANAGE = "more_rfid_manage"
 
     const val LOT_SELECT  = "lot_select"
     const val LOT_MENU    = "lot_menu/{lotId}/{lotCode}"

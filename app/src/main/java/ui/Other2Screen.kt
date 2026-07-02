@@ -72,6 +72,13 @@ fun Other2Screen(
                 icon = Icons.Outlined.SupportAgent,
                 isEnabled = false
             ),
+            MoreMenuItem(
+                title = "จัดการแท็ก RFID",
+                subtitle = "เปลี่ยนแท็กเดิมเป็นแท็กใหม่ หรือ ลบแท็ก",
+                route = Routes.MORE_RFID_MANAGE,
+                icon = Icons.Outlined.Style,
+                isEnabled = true
+            ),
             // ✅ เปลี่ยนไอคอนและข้อความ และสั่งให้วิ่งไปหน้า MORE_UPDATE_SYSTEM
             MoreMenuItem(
                 title = "ซิงค์ข้อมูล (อัพเดตระบบ)",

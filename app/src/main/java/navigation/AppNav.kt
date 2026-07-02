@@ -60,6 +60,7 @@ import ui.Other1Screen
 import ui.Other2Screen
 import ui.ReceiveScreen
 import ui.StockCountScreen
+import ui.RfidManageScreen
 
 // --- Data Class สำหรับเมนู ---
 data class MenuData(
@@ -265,6 +266,7 @@ fun AppNav() {
         composable(Routes.MORE_DAMAGE) { MoreDamageScreen(onBack = { safeBack() }) }
         composable(Routes.MORE_ISSUES) { MoreIssuesScreen(onBack = { safeBack() }) }
         composable(Routes.MORE_UPDATE_SYSTEM) { MoreUpdateSystemScreen(onBack = { safeBack() }) }
+        composable(Routes.MORE_RFID_MANAGE) { RfidManageScreen(onBack = { safeBack() }) }
     }
 }
 
